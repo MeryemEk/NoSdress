@@ -8,6 +8,9 @@ const MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet",
   "août", "septembre", "octobre", "novembre", "décembre"];
 
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+/* Les photos du jour vivent dans le même magasin que celles des pièces, sous une
+   clé préfixée : elles suivent donc l'export et l'import sans traitement à part. */
+const clePhotoJour = (date) => `jour:${date}`;
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const joli = (s) => {
   const [a, m, j] = s.split("-");
@@ -113,6 +116,31 @@ export default function App() {
     rafraichir();
   };
 
+  /* Photo de ce qui a réellement été porté un jour donné, indépendante de la
+     tenue planifiée : on peut l'ajouter le jour même ou bien après coup. */
+  const ajouterPhotoJour = async (date, fichier) => {
+    const b = await compresser(fichier);
+    const cle = clePhotoJour(date);
+    await poser("photos", b, cle);
+    setUrls((u) => {
+      const n = { ...u };
+      if (n[cle]) URL.revokeObjectURL(n[cle]);
+      n[cle] = URL.createObjectURL(b);
+      return n;
+    });
+  };
+
+  const retirerPhotoJour = async (date) => {
+    const cle = clePhotoJour(date);
+    await oter("photos", cle);
+    setUrls((u) => {
+      const n = { ...u };
+      if (n[cle]) URL.revokeObjectURL(n[cle]);
+      delete n[cle];
+      return n;
+    });
+  };
+
   const stats = useMemo(() => {
     const parTenue = {}; const parPiece = {}; const today = iso(new Date());
     Object.entries(journal).forEach(([d, tid]) => {
@@ -134,6 +162,7 @@ export default function App() {
     pieces, tenues, journal, urls, stats, setVue, setOuvert, setErreur,
     piece: (id) => pieces.find((p) => p.id === id),
     ajouterPiece, majPiece, supprimerPiece, ajouterTenue, supprimerTenue, marquerJour,
+    ajouterPhotoJour, retirerPhotoJour,
   };
 
   return (
@@ -581,11 +610,14 @@ function Compositeur({ pieces, urls, ajouterTenue, fermer, dateDefaut, apres }) 
 
 /* ------------------------------------------------------------------ calendrier */
 
-function VueCalendrier({ tenues, journal, urls, marquerJour, pieces, ajouterTenue }) {
+function VueCalendrier({ tenues, journal, urls, marquerJour, pieces, ajouterTenue,
+  ajouterPhotoJour, retirerPhotoJour, setErreur }) {
   const maintenant = new Date();
   const [curseur, setCurseur] = useState({ a: maintenant.getFullYear(), m: maintenant.getMonth() });
   const [jour, setJour] = useState(null);
   const [compo, setCompo] = useState(null); // date pour laquelle on compose depuis la garde-robe
+  const [enregistrePhoto, setEnregistrePhoto] = useState(false);
+  const champPhoto = useRef(null);
   const today = iso(maintenant);
 
   const decalage = (new Date(curseur.a, curseur.m, 1).getDay() + 6) % 7;
@@ -597,11 +629,23 @@ function VueCalendrier({ tenues, journal, urls, marquerJour, pieces, ajouterTenu
     setCurseur({ a: curseur.a + Math.floor(m / 12), m: ((m % 12) + 12) % 12 });
   };
 
+  /* La photo réellement portée prime sur l'aperçu de la tenue planifiée. */
   const vignette = (date) => {
+    const propre = urls[clePhotoJour(date)];
+    if (propre) return propre;
     const t = tenues.find((x) => x.id === journal[date]);
     if (!t) return null;
     const id = t.itemIds.find((x) => urls[x]);
     return id ? urls[id] : null;
+  };
+
+  const traiterPhoto = async (fichiers) => {
+    const f = (fichiers || [])[0];
+    if (!f || !jour) return;
+    setEnregistrePhoto(true);
+    try { await ajouterPhotoJour(jour, f); }
+    catch (e) { setErreur("Photo impossible à enregistrer : " + (e && e.message ? e.message : e)); }
+    setEnregistrePhoto(false);
   };
 
   return (
@@ -629,7 +673,8 @@ function VueCalendrier({ tenues, journal, urls, marquerJour, pieces, ajouterTenu
         })}
       </div>
       <p className="note" style={{ marginTop: 16 }}>
-        Cadre plein : tenue portée. Cadre pointillé : tenue prévue. Touche un jour pour l'assigner.
+        Cadre plein : tenue portée. Cadre pointillé : tenue prévue. Touche un jour pour composer
+        une tenue ou y ajouter la photo de ce que tu as porté.
       </p>
 
       {jour && (
@@ -641,6 +686,13 @@ function VueCalendrier({ tenues, journal, urls, marquerJour, pieces, ajouterTenu
             <p className="note" style={{ margin: "0 0 16px" }}>
               {jour > today ? "Quelle tenue prévois-tu ?" : "Quelle tenue as-tu portée ?"}
             </p>
+
+            {/* Photo réellement portée : proposée en premier pour aujourd'hui et
+                les jours passés, reléguée en bas pour un jour à venir. */}
+            {jour <= today && (
+              <BlocPhotoJour jour={jour} urls={urls} champPhoto={champPhoto}
+                enregistrePhoto={enregistrePhoto} retirerPhotoJour={retirerPhotoJour} />
+            )}
 
             <button className="bouton contour" disabled={!pieces.length}
               onClick={() => { setCompo(jour); setJour(null); }}>
@@ -666,10 +718,21 @@ function VueCalendrier({ tenues, journal, urls, marquerJour, pieces, ajouterTenu
                 </div>
               </button>
             ))}
-            {journal[jour] && (
-              <button className="bouton danger" style={{ marginTop: 8 }}
-                onClick={async () => { await marquerJour(jour, null); setJour(null); }}>Vider ce jour</button>
+            {jour > today && (
+              <BlocPhotoJour jour={jour} urls={urls} champPhoto={champPhoto}
+                enregistrePhoto={enregistrePhoto} retirerPhotoJour={retirerPhotoJour} />
             )}
+
+            {journal[jour] && (
+              <button className="bouton danger" style={{ marginTop: 18 }}
+                onClick={async () => { await marquerJour(jour, null); setJour(null); }}>
+                Retirer la tenue de ce jour
+              </button>
+            )}
+
+            <input ref={champPhoto} type="file" accept="image/*"
+              style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
+              onChange={(e) => { traiterPhoto(e.target.files); e.target.value = ""; }} />
           </div>
         </>
       )}
@@ -681,6 +744,41 @@ function VueCalendrier({ tenues, journal, urls, marquerJour, pieces, ajouterTenu
           fermer={() => setCompo(null)} />
       )}
     </div>
+  );
+}
+
+/* Photo de ce qui a été porté un jour donné, ajoutée sur le moment ou après coup. */
+function BlocPhotoJour({ jour, urls, champPhoto, enregistrePhoto, retirerPhotoJour }) {
+  const photo = urls[clePhotoJour(jour)];
+  const [confirme, setConfirme] = useState(false);
+
+  return (
+    <section className="section">
+      <div className="entete">photo portée</div>
+      {enregistrePhoto ? (
+        <div style={{ display: "flex", gap: 12, alignItems: "center", padding: "10px 0" }}>
+          <div className="rouet" />
+          <span className="note">Enregistrement de la photo</span>
+        </div>
+      ) : photo ? (
+        <>
+          <img src={photo} alt="Tenue portée ce jour-là"
+            style={{ width: "100%", maxHeight: "38vh", objectFit: "contain", marginBottom: 12 }} />
+          <div className="duo">
+            <button className="bouton discret" onClick={() => champPhoto.current && champPhoto.current.click()}>
+              Remplacer
+            </button>
+            {confirme
+              ? <button className="bouton danger" onClick={async () => { await retirerPhotoJour(jour); setConfirme(false); }}>Confirmer</button>
+              : <button className="bouton danger" onClick={() => setConfirme(true)}>Retirer la photo</button>}
+          </div>
+        </>
+      ) : (
+        <button className="bouton discret" onClick={() => champPhoto.current && champPhoto.current.click()}>
+          Ajouter une photo de ce que j'ai porté
+        </button>
+      )}
+    </section>
   );
 }
 
