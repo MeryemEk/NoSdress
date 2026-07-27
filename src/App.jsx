@@ -315,7 +315,10 @@ function Ajout({ ajouterPiece, fermer, setErreur }) {
             {souci && <p className="note" style={{ color: "var(--alerte)", marginTop: 0 }}>{souci}</p>}
             <Formulaire
               depart={fiche} apercu={apercu}
-              valider={async (f) => { await ajouterPiece(f, blob); fermer(); }}
+              valider={async (f) => {
+                try { await ajouterPiece(f, blob); fermer(); }
+                catch (e) { setSouci("Enregistrement impossible : " + (e && e.message ? e.message : e)); }
+              }}
               annuler={fermer}
             />
           </>
@@ -386,7 +389,7 @@ function Formulaire({ depart, apercu, valider, annuler }) {
   );
 }
 
-function FichePiece({ id, pieces, urls, stats, majPiece, supprimerPiece, setOuvert }) {
+function FichePiece({ id, pieces, urls, stats, majPiece, supprimerPiece, setOuvert, setErreur }) {
   const p = pieces.find((x) => x.id === id);
   const [edition, setEdition] = useState(false);
   const [confirme, setConfirme] = useState(false);
@@ -400,7 +403,10 @@ function FichePiece({ id, pieces, urls, stats, majPiece, supprimerPiece, setOuve
         <div className="poignee" />
         {edition ? (
           <Formulaire depart={p} apercu={urls[id]}
-            valider={async (f) => { await majPiece({ ...p, ...f }); setEdition(false); }}
+            valider={async (f) => {
+              try { await majPiece({ ...p, ...f }); setEdition(false); }
+              catch (e) { setErreur("Enregistrement impossible : " + (e && e.message ? e.message : e)); }
+            }}
             annuler={() => setEdition(false)} />
         ) : (
           <>
@@ -733,9 +739,17 @@ function VueDonnees({ pieces, tenues, journal, setErreur }) {
   const [etat, setEtat] = useState("");
   const [enAttente, setEnAttente] = useState(null); // { data, resume } avant confirmation
   const [place, setPlace] = useState(null);
+  const [code, setCode] = useState(codeLocal.lire());
+  const [codeEnregistre, setCodeEnregistre] = useState(false);
   const champ = useRef(null);
 
   const jours = Object.keys(journal || {}).length;
+
+  const enregistrerCode = () => {
+    codeLocal.ecrire(code.trim());
+    setCodeEnregistre(true);
+    setTimeout(() => setCodeEnregistre(false), 2500);
+  };
 
   useEffect(() => {
     estimerPlace().then(setPlace).catch(() => setPlace(null));
@@ -786,6 +800,21 @@ function VueDonnees({ pieces, tenues, journal, setErreur }) {
   return (
     <div className="corps">
       <section className="section" style={{ marginTop: 8 }}>
+        <div className="entete">code d'accès</div>
+        <p className="note" style={{ marginTop: 0 }}>
+          Le code que tu as défini sur Vercel (variable DRESSING_CODE). Il est demandé
+          une seule fois pour autoriser l'identification automatique des photos, puis
+          retenu sur cet appareil. L'enregistrement des pièces à la main n'en a pas besoin.
+        </p>
+        <div className="champ">
+          <label>Code</label>
+          <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="celui défini sur Vercel" />
+        </div>
+        <button className="bouton contour" onClick={enregistrerCode}>Enregistrer le code</button>
+        {codeEnregistre && <p className="note" style={{ marginTop: 10, color: "var(--olive)" }}>Code enregistré.</p>}
+      </section>
+
+      <section className="section">
         <div className="entete">sauvegarde</div>
         <p className="note" style={{ marginTop: 0 }}>
           Ton catalogue vit dans ce navigateur. Exporte-le régulièrement dans un fichier
