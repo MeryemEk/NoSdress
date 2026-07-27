@@ -4,6 +4,26 @@ export const CATS = ["Haut", "Bas", "Robe", "Veste", "Chaussures", "Sac", "Acces
 export const SAISONS = ["Printemps", "Été", "Automne", "Hiver"];
 export const FORM = { 1: "Très décontracté", 2: "Décontracté", 3: "Soigné", 4: "Habillé", 5: "Très habillé" };
 
+/* Suggestions de saisie proposées dans le formulaire (aide, pas contrainte). */
+export const TYPES = [
+  "T-shirt", "Chemise", "Chemisier", "Blouse", "Pull", "Gilet", "Cardigan", "Débardeur", "Top", "Sweat",
+  "Jean", "Pantalon", "Chino", "Legging", "Jupe", "Short",
+  "Robe", "Combinaison",
+  "Manteau", "Trench", "Blazer", "Veste", "Doudoune", "Imperméable",
+  "Escarpin", "Ballerine", "Mocassin", "Basket", "Botte", "Bottine", "Sandale",
+  "Sac à main", "Cabas", "Pochette", "Sac à dos",
+  "Ceinture", "Écharpe", "Foulard", "Chapeau", "Casquette", "Gants",
+  "Collier", "Bracelet", "Boucles d'oreilles", "Bague", "Montre",
+];
+export const MATIERES = [
+  "Coton", "Lin", "Laine", "Cachemire", "Soie", "Cuir", "Daim", "Denim", "Velours", "Maille",
+  "Polyester", "Viscose", "Nylon", "Élasthanne", "Satin", "Mousseline", "Tweed", "Jersey", "Feutre",
+];
+export const COULEURS = [
+  "Noir", "Blanc", "Gris", "Beige", "Écru", "Camel", "Marron", "Bordeaux", "Rouge", "Rose",
+  "Orange", "Moutarde", "Jaune", "Vert", "Kaki", "Bleu", "Marine", "Violet", "Doré", "Argenté",
+];
+
 export const codeLocal = {
   lire: () => localStorage.getItem("dressing:code") || "",
   ecrire: (v) => localStorage.setItem("dressing:code", v),
@@ -51,6 +71,7 @@ Réponds uniquement avec un objet JSON valide, sans texte autour ni balise markd
 "couleurs":["1 à 3 couleurs en français"],
 "marque":"marque uniquement si un logo ou une étiquette est lisible, sinon null",
 "matiere":"matière apparente ou null",
+"taille":"taille si elle est lisible sur une étiquette (ex: 38, M, 40, EU 39), sinon null",
 "motif":"uni, rayé, imprimé, à carreaux, etc.",
 "saisons":["Printemps","Été","Automne","Hiver"],
 "styles":["2 à 3 mots-clés: business, casual, soirée, sport, minimal, bohème..."],
@@ -74,6 +95,7 @@ export function normaliser(f = {}) {
     couleurs: Array.isArray(f.couleurs) ? f.couleurs.slice(0, 3) : [],
     marque: f.marque && f.marque !== "null" ? f.marque : "",
     matiere: f.matiere && f.matiere !== "null" ? f.matiere : "",
+    taille: f.taille && f.taille !== "null" ? String(f.taille) : "",
     motif: f.motif || "",
     saisons: Array.isArray(f.saisons) ? f.saisons.filter((s) => SAISONS.includes(s)) : [...SAISONS],
     styles: Array.isArray(f.styles) ? f.styles.slice(0, 4) : [],

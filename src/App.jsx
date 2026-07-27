@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { tout, lire, poser, oter, toutesLesPhotos, compresser, enBase64,
   exporterDonnees, importerDonnees, resumerSauvegarde, estimerPlace } from "./db.js";
-import { identifier, suggerer, normaliser, codeLocal, CATS, SAISONS, FORM } from "./ai.js";
+import { identifier, suggerer, normaliser, codeLocal, CATS, SAISONS, FORM, TYPES, MATIERES, COULEURS } from "./ai.js";
 
 const JOURS = ["L", "M", "M", "J", "V", "S", "D"];
 const MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet",
@@ -333,10 +333,15 @@ function Ajout({ ajouterPiece, fermer, setErreur }) {
 }
 
 function Formulaire({ depart, apercu, valider, annuler }) {
-  const [f, setF] = useState(depart);
+  const [f, setF] = useState({ taille: "", ...depart });
   const sur = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const bascule = (k, v) => setF({ ...f, [k]: f[k].includes(v) ? f[k].filter((x) => x !== v) : [...f[k], v] });
   const liste = (k) => (e) => setF({ ...f, [k]: e.target.value.split(",").map((s) => s.trim()).filter(Boolean) });
+  const basculeCouleur = (col) => {
+    const c = col.toLowerCase();
+    const existe = f.couleurs.some((x) => x.toLowerCase() === c);
+    setF({ ...f, couleurs: existe ? f.couleurs.filter((x) => x.toLowerCase() !== c) : [...f.couleurs, c] });
+  };
 
   return (
     <>
@@ -359,10 +364,28 @@ function Formulaire({ depart, apercu, valider, annuler }) {
         </div>
       </div>
       <div className="duo">
-        <div className="champ"><label>Type</label><input value={f.sousCategorie} onChange={sur("sousCategorie")} /></div>
-        <div className="champ"><label>Matière</label><input value={f.matiere} onChange={sur("matiere")} /></div>
+        <div className="champ"><label>Type</label>
+          <input value={f.sousCategorie} onChange={sur("sousCategorie")} list="aide-types" placeholder="ex: chemise" />
+        </div>
+        <div className="champ"><label>Taille</label>
+          <input value={f.taille} onChange={sur("taille")} placeholder="ex: 38, M" />
+        </div>
       </div>
-      <div className="champ"><label>Couleurs</label><input value={f.couleurs.join(", ")} onChange={liste("couleurs")} /></div>
+      <div className="champ"><label>Matière</label>
+        <input value={f.matiere} onChange={sur("matiere")} list="aide-matieres" placeholder="ex: coton" />
+      </div>
+      <div className="champ"><label>Couleurs</label>
+        <input value={f.couleurs.join(", ")} onChange={liste("couleurs")} />
+        <div className="pastilles" style={{ marginTop: 8 }}>
+          {COULEURS.map((col) => (
+            <button key={col} type="button" className="pastille"
+              data-actif={f.couleurs.some((x) => x.toLowerCase() === col.toLowerCase()) ? "1" : "0"}
+              onClick={() => basculeCouleur(col)}>{col}</button>
+          ))}
+        </div>
+      </div>
+      <datalist id="aide-types">{TYPES.map((t) => <option key={t} value={t} />)}</datalist>
+      <datalist id="aide-matieres">{MATIERES.map((m) => <option key={m} value={m} />)}</datalist>
       <div className="champ"><label>Mots-clés</label><input value={f.styles.join(", ")} onChange={liste("styles")} /></div>
       <div className="champ"><label>Saisons</label>
         <div className="pastilles">
@@ -422,6 +445,7 @@ function FichePiece({ id, pieces, urls, stats, majPiece, supprimerPiece, setOuve
                 <dt>Catégorie</dt><dd>{p.categorie}{p.sousCategorie ? `, ${p.sousCategorie}` : ""}</dd>
                 {p.couleurs.length > 0 && <><dt>Couleurs</dt><dd>{p.couleurs.join(", ")}</dd></>}
                 {p.matiere && <><dt>Matière</dt><dd>{p.matiere}</dd></>}
+                {p.taille && <><dt>Taille</dt><dd>{p.taille}</dd></>}
                 {p.motif && <><dt>Motif</dt><dd>{p.motif}</dd></>}
                 <dt>Saisons</dt><dd>{p.saisons.join(", ") || "toutes"}</dd>
                 <dt>Registre</dt><dd>{FORM[p.formalite]}</dd>
