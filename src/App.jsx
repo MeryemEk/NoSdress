@@ -530,7 +530,9 @@ function CarteTenue({ t, urls, piece, stats, supprimerTenue, action }) {
   );
 }
 
-function Compositeur({ pieces, urls, ajouterTenue, fermer }) {
+/* dateDefaut : jour visé quand la composition part du calendrier, sert au nom
+   par défaut. apres : reçoit la tenue créée, pour l'assigner dans la foulée. */
+function Compositeur({ pieces, urls, ajouterTenue, fermer, dateDefaut, apres }) {
   const [choix, setChoix] = useState([]);
   const [nom, setNom] = useState("");
   const groupes = CATS.map((k) => [k, pieces.filter((p) => p.categorie === k)]).filter(([, l]) => l.length);
@@ -541,7 +543,9 @@ function Compositeur({ pieces, urls, ajouterTenue, fermer }) {
       <div className="panneau">
         <div className="poignee" />
         <h2 style={{ fontWeight: 300, fontSize: 22, margin: "0 0 8px" }}>Composer une tenue</h2>
-        <p className="note" style={{ margin: "0 0 16px" }}>Une pièce suffit.</p>
+        <p className="note" style={{ margin: "0 0 16px" }}>
+          {dateDefaut ? `Une pièce suffit. Elle sera assignée au ${joli(dateDefaut)}.` : "Une pièce suffit."}
+        </p>
         <div className="champ"><label>Nom</label>
           <input value={nom} onChange={(e) => setNom(e.target.value)} placeholder="Lundi comité de direction" /></div>
         {groupes.map(([cat, liste]) => (
@@ -562,7 +566,11 @@ function Compositeur({ pieces, urls, ajouterTenue, fermer }) {
           <button className="bouton discret" onClick={fermer}>Annuler</button>
           <button className="bouton plein" disabled={!choix.length}
             onClick={async () => {
-              await ajouterTenue({ nom: nom.trim() || `Tenue du ${joli(iso(new Date()))}`, itemIds: choix, note: "" });
+              const t = await ajouterTenue({
+                nom: nom.trim() || `Tenue du ${joli(dateDefaut || iso(new Date()))}`,
+                itemIds: choix, note: "",
+              });
+              if (apres) await apres(t);
               fermer();
             }}>Enregistrer ({choix.length})</button>
         </div>
@@ -573,10 +581,11 @@ function Compositeur({ pieces, urls, ajouterTenue, fermer }) {
 
 /* ------------------------------------------------------------------ calendrier */
 
-function VueCalendrier({ tenues, journal, urls, marquerJour }) {
+function VueCalendrier({ tenues, journal, urls, marquerJour, pieces, ajouterTenue }) {
   const maintenant = new Date();
   const [curseur, setCurseur] = useState({ a: maintenant.getFullYear(), m: maintenant.getMonth() });
   const [jour, setJour] = useState(null);
+  const [compo, setCompo] = useState(null); // date pour laquelle on compose depuis la garde-robe
   const today = iso(maintenant);
 
   const decalage = (new Date(curseur.a, curseur.m, 1).getDay() + 6) % 7;
@@ -632,7 +641,18 @@ function VueCalendrier({ tenues, journal, urls, marquerJour }) {
             <p className="note" style={{ margin: "0 0 16px" }}>
               {jour > today ? "Quelle tenue prévois-tu ?" : "Quelle tenue as-tu portée ?"}
             </p>
-            {!tenues.length && <p className="note">Compose d'abord une tenue.</p>}
+
+            <button className="bouton contour" disabled={!pieces.length}
+              onClick={() => { setCompo(jour); setJour(null); }}>
+              {pieces.length ? "Composer à partir de ma garde-robe" : "Ajoute d'abord une pièce"}
+            </button>
+
+            {tenues.length > 0 && (
+              <div className="entete" style={{ marginTop: 22 }}>ou reprendre une tenue</div>
+            )}
+            {!tenues.length && (
+              <p className="note" style={{ marginTop: 14 }}>Aucune tenue enregistrée pour l'instant.</p>
+            )}
             {tenues.map((t) => (
               <button key={t.id} style={{ display: "block", width: "100%", textAlign: "left" }}
                 onClick={async () => { await marquerJour(jour, t.id); setJour(null); }}>
@@ -652,6 +672,13 @@ function VueCalendrier({ tenues, journal, urls, marquerJour }) {
             )}
           </div>
         </>
+      )}
+
+      {compo && (
+        <Compositeur pieces={pieces} urls={urls} ajouterTenue={ajouterTenue}
+          dateDefaut={compo}
+          apres={async (t) => { await marquerJour(compo, t.id); }}
+          fermer={() => setCompo(null)} />
       )}
     </div>
   );
