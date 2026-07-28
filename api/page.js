@@ -75,17 +75,42 @@ export default async function handler(req, res) {
 
   const entetes = {
     "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
-    "accept": "text/html,application/xhtml+xml",
+    "accept": "text/html,application/xhtml+xml,image/*;q=0.8,*/*;q=0.5",
     "accept-language": "fr-FR,fr;q=0.9,en;q=0.8",
+    "upgrade-insecure-requests": "1",
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "none",
+  };
+
+  /* Lit une réponse image et la renvoie encodée. */
+  const renvoyerImage = async (reponse, contexte = "", marque = "") => {
+    const octets = Buffer.from(await reponse.arrayBuffer());
+    if (!octets.length) return res.status(502).json({ error: "Image vide." });
+    if (octets.length > 8000000) return res.status(413).json({ error: "Image trop lourde." });
+    return res.status(200).json({
+      image: octets.toString("base64"),
+      typeImage: (reponse.headers.get("content-type") || "image/jpeg").split(";")[0],
+      contexte, marque, source: cible.href,
+    });
   };
 
   try {
     const r = await fetch(cible.href, { headers: entetes, redirect: "follow" });
     if (!r.ok) {
+      const bloque = r.status === 403 || r.status === 401 || r.status === 429;
       return res.status(502).json({
-        error: `La boutique a refusé la lecture de la page (code ${r.status}). Enregistre plutôt la photo à la main.`,
+        error: bloque
+          ? `Cette boutique bloque la lecture automatique (code ${r.status}). Fais un appui long sur la photo du produit dans Safari, choisis « Ajouter aux photos », puis ajoute-la ici comme une photo normale.`
+          : `La boutique a refusé la lecture de la page (code ${r.status}).`,
       });
     }
+
+    /* Lien collé directement vers une image : les serveurs d'images sont
+       rarement protégés, même quand la page produit l'est. */
+    const typeRecu = r.headers.get("content-type") || "";
+    if (typeRecu.startsWith("image/")) return await renvoyerImage(r);
+
     const html = (await r.text()).slice(0, 600000);
     const m = metas(html);
     const produit = donneesProduit(html) || {};
@@ -101,10 +126,6 @@ export default async function handler(req, res) {
     });
     if (!ri.ok) return res.status(502).json({ error: "L'image du produit est inaccessible." });
 
-    const octets = Buffer.from(await ri.arrayBuffer());
-    if (!octets.length) return res.status(502).json({ error: "Image vide." });
-    if (octets.length > 8000000) return res.status(413).json({ error: "Image trop lourde." });
-
     const titreBrut = (html.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || "";
     const infos = [
       produit.nom || m["og:title"] || m["twitter:title"] || decoder(titreBrut),
@@ -114,13 +135,7 @@ export default async function handler(req, res) {
       produit.description || m["og:description"] || m.description || "",
     ].filter(Boolean).join("\n").slice(0, 900);
 
-    return res.status(200).json({
-      image: octets.toString("base64"),
-      typeImage: (ri.headers.get("content-type") || "image/jpeg").split(";")[0],
-      contexte: infos,
-      marque: produit.marque || m["og:site_name"] || "",
-      source: cible.href,
-    });
+    return await renvoyerImage(ri, infos, produit.marque || m["og:site_name"] || "");
   } catch (e) {
     return res.status(502).json({ error: "Page illisible depuis le serveur. " + String(e && e.message ? e.message : e) });
   }

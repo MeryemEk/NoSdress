@@ -357,8 +357,9 @@ function Ajout({ ajouterPiece, fermer, setErreur }) {
             <button className="bouton contour" disabled={!lien.trim()}
               onClick={() => importerLien(lien.trim())}>Importer depuis le lien</button>
             <p className="note" style={{ marginTop: 10 }}>
-              La photo du produit et sa description sont récupérées sur la page. Certaines
-              boutiques bloquent cette lecture, tu le sauras tout de suite.
+              Lien d'une page produit, ou lien direct d'une image. Certaines enseignes,
+              dont Zara et Oysho, bloquent la lecture de leurs pages : dans ce cas, appui
+              long sur la photo dans Safari, « Ajouter aux photos », puis ajoute-la ci-dessus.
             </p>
 
             {souci && <p className="note" style={{ marginTop: 12, color: "var(--alerte)" }}>{souci}</p>}
