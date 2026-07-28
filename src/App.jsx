@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { tout, lire, poser, oter, toutesLesPhotos, compresser, enBase64,
+import { tout, lire, poser, oter, toutesLesPhotos, compresser, enBase64, base64EnBlob,
   exporterDonnees, importerDonnees, resumerSauvegarde, estimerPlace } from "./db.js";
-import { identifier, suggerer, normaliser, codeLocal, CATS, SAISONS, FORM, TYPES, MATIERES, COULEURS } from "./ai.js";
+import { identifier, lirePage, suggerer, normaliser, codeLocal,
+  CATS, SAISONS, FORM, TYPES, MATIERES, COULEURS } from "./ai.js";
 
 const JOURS = ["L", "M", "M", "J", "V", "S", "D"];
 const MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet",
@@ -264,7 +265,29 @@ function Ajout({ ajouterPiece, fermer, setErreur }) {
   const [progres, setProgres] = useState("");
   const [web, setWeb] = useState(false);
   const [souci, setSouci] = useState("");
+  const [lien, setLien] = useState("");
   const champ = useRef(null);
+
+  /* Import depuis une page produit : le serveur lit la page et rapporte l'image,
+     qui repasse ensuite par la compression et l'identification habituelles. */
+  const importerLien = async (url) => {
+    setSouci("");
+    setEtape("lecture");
+    try {
+      const page = await lirePage(url);
+      const b = await compresser(base64EnBlob(page.image, page.typeImage));
+      setBlob(b);
+      setApercu(URL.createObjectURL(b));
+      setEtape("analyse");
+      const f = await identifier(await enBase64(b), web, page.contexte);
+      if (!f.marque && page.marque) f.marque = page.marque;
+      setFiche(f);
+      setEtape("fiche");
+    } catch (e) {
+      setEtape("choix");
+      setSouci(e && e.message ? e.message : String(e));
+    }
+  };
 
   const traiter = async (fichiers) => {
     const liste = Array.from(fichiers || []);
@@ -325,6 +348,20 @@ function Ajout({ ajouterPiece, fermer, setErreur }) {
               La confirmation web ne se déclenche que si une étiquette est lisible. Elle ajoute une dizaine
               de secondes par pièce, laisse-la éteinte pour un gros import.
             </p>
+
+            <div className="champ" style={{ marginTop: 22 }}>
+              <label>Ou depuis un lien de boutique</label>
+              <input value={lien} onChange={(e) => setLien(e.target.value)} inputMode="url"
+                placeholder="https://..." />
+            </div>
+            <button className="bouton contour" disabled={!lien.trim()}
+              onClick={() => importerLien(lien.trim())}>Importer depuis le lien</button>
+            <p className="note" style={{ marginTop: 10 }}>
+              La photo du produit et sa description sont récupérées sur la page. Certaines
+              boutiques bloquent cette lecture, tu le sauras tout de suite.
+            </p>
+
+            {souci && <p className="note" style={{ marginTop: 12, color: "var(--alerte)" }}>{souci}</p>}
           </>
         )}
 

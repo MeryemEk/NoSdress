@@ -104,12 +104,37 @@ export function normaliser(f = {}) {
   };
 }
 
-export async function identifier(base64, web) {
+export async function identifier(base64, web, contexte) {
+  const consigne = (web ? CONSIGNE + CONSIGNE_WEB : CONSIGNE) + (contexte
+    ? `\n\nInformations lues sur la fiche produit du site. Utilise-les si elles concordent
+avec l'image, notamment pour la marque, la matière et la taille. Ignore-les si elles
+contredisent ce que tu vois :\n${contexte}`
+    : "");
   const brut = await appeler([
     { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64 } },
-    { type: "text", text: web ? CONSIGNE + CONSIGNE_WEB : CONSIGNE },
+    { type: "text", text: consigne },
   ], { web });
   return normaliser(brut);
+}
+
+/* Demande au serveur de lire une page produit et d'en rapporter l'image. */
+export async function lirePage(url) {
+  const stop = new AbortController();
+  const minuteur = setTimeout(() => stop.abort(), 35000);
+  try {
+    const r = await fetch("/api/page", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-dressing-code": codeLocal.lire() },
+      body: JSON.stringify({ url }),
+      signal: stop.signal,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.status === 401) throw new Error("Code d'accès refusé");
+    if (!r.ok) throw new Error(data.error || "Lecture de la page impossible");
+    return data;
+  } finally {
+    clearTimeout(minuteur);
+  }
 }
 
 export async function suggerer({ pieces, contexte, recentes, date }) {

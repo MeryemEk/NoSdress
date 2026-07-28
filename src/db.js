@@ -111,6 +111,14 @@ const blobEnDataURL = (blob) => new Promise((res, rej) => {
   l.readAsDataURL(blob);
 });
 
+/* Reconstruit une image à partir du base64 renvoyé par le serveur. */
+export function base64EnBlob(base64, type = "image/jpeg") {
+  const binaire = atob(String(base64 || ""));
+  const octets = new Uint8Array(binaire.length);
+  for (let i = 0; i < binaire.length; i++) octets[i] = binaire.charCodeAt(i);
+  return new Blob([octets], { type });
+}
+
 function dataURLEnBlob(dataURL) {
   const [tete, corps] = String(dataURL).split(",");
   const type = (tete.match(/data:(.*?);base64/) || [])[1] || "image/jpeg";
