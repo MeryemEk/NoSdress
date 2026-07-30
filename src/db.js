@@ -97,6 +97,67 @@ export async function estimerPlace() {
   return { utilise: usage || 0, total: quota || 0 };
 }
 
+/* ------------------------------------------------------------------ journal
+
+   Le journal associe une date à une liste de créneaux. Un créneau porte la
+   tenue, un libellé de moment et une note libre. Le libellé appartient au
+   créneau et non à la tenue : la même tenue peut être "Plage" un jour et
+   "Déjeuner" un autre.
+
+   Format : { "2026-07-27": [{ id, tenueId, libelle, note }, ...] }
+   Ancien format, encore présent chez les installations existantes :
+            { "2026-07-27": "idDeLaTenue" } */
+
+export const LIBELLE_DEFAUT = "Journée";
+export const LIBELLES = ["Journée", "Matin", "Déjeuner", "Après-midi", "Plage",
+  "Dîner", "Soirée", "Sport", "Voyage"];
+
+/* Identifiant déterministe, pour que rejouer la migration ne change rien. */
+const idCreneau = (date, rang) => `${date}#${rang}`;
+
+function normaliserCreneau(brut, date, rang) {
+  if (!brut || typeof brut !== "object") return null;
+  const tenueId = typeof brut.tenueId === "string" ? brut.tenueId : "";
+  if (!tenueId) return null;
+  const libelle = typeof brut.libelle === "string" && brut.libelle.trim()
+    ? brut.libelle.trim() : LIBELLE_DEFAUT;
+  return {
+    id: typeof brut.id === "string" && brut.id ? brut.id : idCreneau(date, rang),
+    tenueId,
+    libelle,
+    note: typeof brut.note === "string" ? brut.note : "",
+  };
+}
+
+/* Convertit un journal vers le format à créneaux. Rejouable : appliquée à un
+   journal déjà converti, elle rend exactement le même objet et signale
+   change = false, donc aucune duplication possible. */
+export function migrerJournal(journal) {
+  const source = journal && typeof journal === "object" && !Array.isArray(journal) ? journal : {};
+  const sortie = {};
+
+  for (const [date, valeur] of Object.entries(source)) {
+    if (Array.isArray(valeur)) {
+      const creneaux = valeur
+        .map((c, i) => normaliserCreneau(c, date, i))
+        .filter(Boolean);
+      if (creneaux.length) sortie[date] = creneaux;
+    } else if (typeof valeur === "string" && valeur) {
+      // Ancien format : une tenue unique devient un créneau unique.
+      sortie[date] = [{ id: idCreneau(date, 0), tenueId: valeur, libelle: LIBELLE_DEFAUT, note: "" }];
+    }
+    // Toute autre valeur est illisible et n'est pas reportée.
+  }
+
+  return { journal: sortie, change: JSON.stringify(source) !== JSON.stringify(sortie) };
+}
+
+/* Tous les créneaux à plat, pratique pour les statistiques. */
+export function creneauxAPlat(journal) {
+  return Object.entries(journal || {}).flatMap(([date, liste]) =>
+    (Array.isArray(liste) ? liste : []).map((c) => ({ ...c, date })));
+}
+
 /* ------------------------------------------------------------------ sauvegarde
 
    Export et import complets du catalogue (fiches, tenues, journal, photos).
@@ -149,11 +210,11 @@ export async function exporterDonnees() {
   }
   return {
     format: "dressing",
-    version: 1,
+    version: 2, // 2 : journal à créneaux
     exporte: new Date().toISOString(),
     pieces: pieces || [],
     tenues: tenues || [],
-    journal: journal || {},
+    journal: migrerJournal(journal).journal,
     photos: photosEncodees,
   };
 }
@@ -163,11 +224,13 @@ export function resumerSauvegarde(data) {
   if (!data || data.format !== "dressing" || !Array.isArray(data.pieces)) {
     throw new Error("Fichier non reconnu. Attendu : un export Dressing (.json).");
   }
+  const journal = migrerJournal(data.journal).journal;
   return {
     pieces: data.pieces.length,
     tenues: Array.isArray(data.tenues) ? data.tenues.length : 0,
     photos: data.photos ? Object.keys(data.photos).length : 0,
-    jours: data.journal ? Object.keys(data.journal).length : 0,
+    jours: Object.keys(journal).length,
+    creneaux: creneauxAPlat(journal).length,
     exporte: data.exporte || "",
   };
 }
@@ -181,7 +244,8 @@ export async function importerDonnees(data) {
   ]);
   for (const p of data.pieces) await poser("pieces", p);
   for (const t of (data.tenues || [])) await poser("tenues", t);
-  await poser("divers", data.journal || {}, "journal");
+  // Une sauvegarde à l'ancien format est convertie au passage.
+  await poser("divers", migrerJournal(data.journal).journal, "journal");
   for (const [id, dataURL] of Object.entries(data.photos || {})) {
     await poser("photos", dataURLEnBlob(dataURL), id);
   }

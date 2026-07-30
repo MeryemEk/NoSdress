@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { tout, lire, poser, oter, toutesLesPhotos, compresser, enBase64, base64EnBlob,
-  exporterDonnees, importerDonnees, resumerSauvegarde, estimerPlace } from "./db.js";
+  exporterDonnees, importerDonnees, resumerSauvegarde, estimerPlace,
+  migrerJournal, creneauxAPlat, LIBELLES, LIBELLE_DEFAUT } from "./db.js";
 import { identifier, lirePage, suggerer, normaliser, codeLocal,
   CATS, SAISONS, FORM, TYPES, MATIERES, COULEURS } from "./ai.js";
 
@@ -36,7 +37,11 @@ export default function App() {
         const [p, t, j, photos] = await Promise.all([
           tout("pieces"), tout("tenues"), lire("divers", "journal"), toutesLesPhotos(),
         ]);
-        boite.current = { pieces: p || [], tenues: t || [], journal: j || {} };
+        // Le journal peut être à l'ancien format, une seule tenue par date.
+        // On le convertit et on ne réécrit la base que si quelque chose a bougé.
+        const migre = migrerJournal(j);
+        if (migre.change) await poser("divers", migre.journal, "journal");
+        boite.current = { pieces: p || [], tenues: t || [], journal: migre.journal };
         const carte = {};
         // On ignore une éventuelle entrée sans image valide : une seule photo
         // corrompue ne doit pas empêcher toute la garde-robe de s'ouvrir.
@@ -102,19 +107,49 @@ export default function App() {
   const supprimerTenue = async (id) => {
     await oter("tenues", id);
     boite.current.tenues = boite.current.tenues.filter((t) => t.id !== id);
-    const j = { ...boite.current.journal };
-    Object.keys(j).forEach((d) => { if (j[d] === id) delete j[d]; });
+    // Les créneaux qui pointaient vers cette tenue disparaissent, les autres
+    // créneaux de la même journée sont conservés.
+    const j = {};
+    Object.entries(boite.current.journal).forEach(([d, liste]) => {
+      const reste = liste.filter((c) => c.tenueId !== id);
+      if (reste.length) j[d] = reste;
+    });
     boite.current.journal = j;
     await poser("divers", j, "journal");
     rafraichir();
   };
 
-  const marquerJour = async (date, tenueId) => {
-    const j = { ...boite.current.journal };
-    if (tenueId) j[date] = tenueId; else delete j[date];
+  /* Écrit le journal et rafraîchit l'affichage. */
+  const poserJournal = async (j) => {
     boite.current.journal = j;
     await poser("divers", j, "journal");
     rafraichir();
+  };
+
+  const ajouterCreneau = async (date, { tenueId, libelle, note }) => {
+    const creneau = {
+      id: uid(),
+      tenueId,
+      libelle: (libelle || "").trim() || LIBELLE_DEFAUT,
+      note: (note || "").trim(),
+    };
+    const j = { ...boite.current.journal, [date]: [...(boite.current.journal[date] || []), creneau] };
+    await poserJournal(j);
+    return creneau;
+  };
+
+  const majCreneau = async (date, creneauId, modif) => {
+    const liste = (boite.current.journal[date] || []).map((c) => (c.id === creneauId
+      ? { ...c, ...modif, libelle: ((modif.libelle ?? c.libelle) || "").trim() || LIBELLE_DEFAUT }
+      : c));
+    await poserJournal({ ...boite.current.journal, [date]: liste });
+  };
+
+  const retirerCreneau = async (date, creneauId) => {
+    const reste = (boite.current.journal[date] || []).filter((c) => c.id !== creneauId);
+    const j = { ...boite.current.journal };
+    if (reste.length) j[date] = reste; else delete j[date];
+    await poserJournal(j);
   };
 
   /* Photo de ce qui a réellement été porté un jour donné, indépendante de la
@@ -142,14 +177,16 @@ export default function App() {
     });
   };
 
+  /* Chaque créneau compte pour un port : deux tenues le même jour comptent
+     deux fois, et la même tenue portée matin et soir compte deux fois aussi. */
   const stats = useMemo(() => {
     const parTenue = {}; const parPiece = {}; const today = iso(new Date());
-    Object.entries(journal).forEach(([d, tid]) => {
+    creneauxAPlat(journal).forEach(({ date: d, tenueId }) => {
       if (d > today) return;
-      parTenue[tid] = parTenue[tid] || { n: 0, last: "" };
-      parTenue[tid].n += 1;
-      if (d > parTenue[tid].last) parTenue[tid].last = d;
-      const t = tenues.find((x) => x.id === tid);
+      parTenue[tenueId] = parTenue[tenueId] || { n: 0, last: "" };
+      parTenue[tenueId].n += 1;
+      if (d > parTenue[tenueId].last) parTenue[tenueId].last = d;
+      const t = tenues.find((x) => x.id === tenueId);
       (t?.itemIds || []).forEach((pid) => {
         parPiece[pid] = parPiece[pid] || { n: 0, last: "" };
         parPiece[pid].n += 1;
@@ -162,7 +199,8 @@ export default function App() {
   const c = {
     pieces, tenues, journal, urls, stats, setVue, setOuvert, setErreur,
     piece: (id) => pieces.find((p) => p.id === id),
-    ajouterPiece, majPiece, supprimerPiece, ajouterTenue, supprimerTenue, marquerJour,
+    ajouterPiece, majPiece, supprimerPiece, ajouterTenue, supprimerTenue,
+    ajouterCreneau, majCreneau, retirerCreneau,
     ajouterPhotoJour, retirerPhotoJour,
   };
 
@@ -536,7 +574,7 @@ function FichePiece({ id, pieces, urls, stats, majPiece, supprimerPiece, setOuve
 /* ------------------------------------------------------------------ tenues */
 
 function VueTenues(c) {
-  const { tenues, pieces, marquerJour } = c;
+  const { tenues, pieces, ajouterCreneau } = c;
   const [compo, setCompo] = useState(false);
   const today = iso(new Date());
 
@@ -557,7 +595,10 @@ function VueTenues(c) {
             <div className="entete">mes tenues · {tenues.length}</div>
             {tenues.map((t) => (
               <CarteTenue key={t.id} t={t} {...c}
-                action={<button className="bouton discret" onClick={() => marquerJour(today, t.id)}>Portée aujourd'hui</button>} />
+                action={<button className="bouton discret"
+                  onClick={() => ajouterCreneau(today, { tenueId: t.id, libelle: LIBELLE_DEFAUT })}>
+                  Portée aujourd'hui
+                </button>} />
             ))}
           </section>
         )}
@@ -648,33 +689,41 @@ function Compositeur({ pieces, urls, ajouterTenue, fermer, dateDefaut, apres }) 
 
 /* ------------------------------------------------------------------ calendrier */
 
-function VueCalendrier({ tenues, journal, urls, marquerJour, pieces, ajouterTenue,
+const JOURS_COURTS = ["lun", "mar", "mer", "jeu", "ven", "sam", "dim"];
+
+const jourDe = (s) => { const [a, m, j] = s.split("-").map(Number); return new Date(a, m - 1, j); };
+const decaler = (d, n) => { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); x.setDate(x.getDate() + n); return x; };
+const lundiDe = (d) => decaler(d, -((d.getDay() + 6) % 7));
+
+function VueCalendrier({ tenues, journal, urls, pieces, ajouterTenue,
+  ajouterCreneau, majCreneau, retirerCreneau,
   ajouterPhotoJour, retirerPhotoJour, setErreur }) {
   const maintenant = new Date();
-  const [curseur, setCurseur] = useState({ a: maintenant.getFullYear(), m: maintenant.getMonth() });
-  const [jour, setJour] = useState(null);
-  const [compo, setCompo] = useState(null); // date pour laquelle on compose depuis la garde-robe
-  const [enregistrePhoto, setEnregistrePhoto] = useState(false);
-  const champPhoto = useRef(null);
   const today = iso(maintenant);
 
-  const decalage = (new Date(curseur.a, curseur.m, 1).getDay() + 6) % 7;
-  const nb = new Date(curseur.a, curseur.m + 1, 0).getDate();
-  const cases = [...Array(decalage).fill(null), ...Array.from({ length: nb }, (_, k) => k + 1)];
+  const [mode, setMode] = useState("semaine");
+  const [curseur, setCurseur] = useState({ a: maintenant.getFullYear(), m: maintenant.getMonth() });
+  const [ancre, setAncre] = useState(iso(lundiDe(maintenant)));
+  const [jour, setJour] = useState(null);
+  const [compo, setCompo] = useState(null);      // date pour laquelle on compose
+  const [preselection, setPreselection] = useState(null); // tenue tout juste composée
+  const [enregistrePhoto, setEnregistrePhoto] = useState(false);
+  const champPhoto = useRef(null);
 
-  const bouger = (d) => {
-    const m = curseur.m + d;
-    setCurseur({ a: curseur.a + Math.floor(m / 12), m: ((m % 12) + 12) % 12 });
+  const creneauxDu = (date) => journal[date] || [];
+
+  const imageTenue = (tenueId) => {
+    const t = tenues.find((x) => x.id === tenueId);
+    const id = (t?.itemIds || []).find((x) => urls[x]);
+    return id ? urls[id] : null;
   };
 
-  /* La photo réellement portée prime sur l'aperçu de la tenue planifiée. */
+  /* Vue mois : la photo réellement portée prime sur l'aperçu de la tenue. */
   const vignette = (date) => {
     const propre = urls[clePhotoJour(date)];
     if (propre) return propre;
-    const t = tenues.find((x) => x.id === journal[date]);
-    if (!t) return null;
-    const id = t.itemIds.find((x) => urls[x]);
-    return id ? urls[id] : null;
+    const premier = creneauxDu(date)[0];
+    return premier ? imageTenue(premier.tenueId) : null;
   };
 
   const traiterPhoto = async (fichiers) => {
@@ -686,101 +735,317 @@ function VueCalendrier({ tenues, journal, urls, marquerJour, pieces, ajouterTenu
     setEnregistrePhoto(false);
   };
 
+  /* ---- mois ---- */
+  const decalage = (new Date(curseur.a, curseur.m, 1).getDay() + 6) % 7;
+  const nb = new Date(curseur.a, curseur.m + 1, 0).getDate();
+  const cases = [...Array(decalage).fill(null), ...Array.from({ length: nb }, (_, k) => k + 1)];
+  const bougerMois = (d) => {
+    const m = curseur.m + d;
+    setCurseur({ a: curseur.a + Math.floor(m / 12), m: ((m % 12) + 12) % 12 });
+  };
+
+  /* ---- semaine ---- */
+  const debut = jourDe(ancre);
+  const septJours = Array.from({ length: 7 }, (_, k) => iso(decaler(debut, k)));
+  const fin = decaler(debut, 6);
+  const bougerSemaine = (d) => setAncre(iso(decaler(debut, d * 7)));
+  const semaineCourante = ancre === iso(lundiDe(maintenant));
+  const titreSemaine = debut.getMonth() === fin.getMonth()
+    ? `${debut.getDate()} – ${fin.getDate()} ${MOIS[fin.getMonth()]}`
+    : `${debut.getDate()} ${MOIS[debut.getMonth()]} – ${fin.getDate()} ${MOIS[fin.getMonth()]}`;
+
   return (
     <div className="corps">
-      <div className="mois">
-        <button onClick={() => bouger(-1)} aria-label="Mois précédent" style={{ fontSize: 20, color: "var(--gris)", padding: "4px 12px" }}>‹</button>
-        <span>{MOIS[curseur.m]} {curseur.a}</span>
-        <button onClick={() => bouger(1)} aria-label="Mois suivant" style={{ fontSize: 20, color: "var(--gris)", padding: "4px 12px" }}>›</button>
+      <div className="pastilles" style={{ marginBottom: 16 }}>
+        <button className="pastille" data-actif={mode === "semaine" ? "1" : "0"}
+          onClick={() => setMode("semaine")}>Semaine</button>
+        <button className="pastille" data-actif={mode === "mois" ? "1" : "0"}
+          onClick={() => setMode("mois")}>Mois</button>
       </div>
-      <div className="calendrier">{JOURS.map((d, k) => <div className="jourNom" key={k}>{d}</div>)}</div>
-      <div className="calendrier" style={{ marginTop: 2 }}>
-        {cases.map((n, k) => {
-          if (!n) return <div key={k} />;
-          const date = iso(new Date(curseur.a, curseur.m, n));
-          const v = vignette(date);
-          return (
-            <button className="jour" key={k} onClick={() => setJour(date)}
-              data-aujourdhui={date === today ? "1" : "0"}
-              data-prevu={date > today && journal[date] ? "1" : "0"}
-              data-img={v ? "1" : "0"}>
-              <em>{n}</em>
-              {v && <img src={v} alt="" loading="lazy" />}
-            </button>
-          );
-        })}
-      </div>
-      <p className="note" style={{ marginTop: 16 }}>
-        Cadre plein : tenue portée. Cadre pointillé : tenue prévue. Touche un jour pour composer
-        une tenue ou y ajouter la photo de ce que tu as porté.
-      </p>
 
-      {jour && (
+      {mode === "semaine" ? (
         <>
-          <div className="rideau" onClick={() => setJour(null)} />
-          <div className="panneau">
-            <div className="poignee" />
-            <h2 style={{ fontWeight: 300, fontSize: 20, margin: "0 0 6px" }}>{joli(jour)}</h2>
-            <p className="note" style={{ margin: "0 0 16px" }}>
-              {jour > today ? "Quelle tenue prévois-tu ?" : "Quelle tenue as-tu portée ?"}
-            </p>
-
-            {/* Photo réellement portée : proposée en premier pour aujourd'hui et
-                les jours passés, reléguée en bas pour un jour à venir. */}
-            {jour <= today && (
-              <BlocPhotoJour jour={jour} urls={urls} champPhoto={champPhoto}
-                enregistrePhoto={enregistrePhoto} retirerPhotoJour={retirerPhotoJour} />
-            )}
-
-            <button className="bouton contour" disabled={!pieces.length}
-              onClick={() => { setCompo(jour); setJour(null); }}>
-              {pieces.length ? "Composer à partir de ma garde-robe" : "Ajoute d'abord une pièce"}
-            </button>
-
-            {tenues.length > 0 && (
-              <div className="entete" style={{ marginTop: 22 }}>ou reprendre une tenue</div>
-            )}
-            {!tenues.length && (
-              <p className="note" style={{ marginTop: 14 }}>Aucune tenue enregistrée pour l'instant.</p>
-            )}
-            {tenues.map((t) => (
-              <button key={t.id} style={{ display: "block", width: "100%", textAlign: "left" }}
-                onClick={async () => { await marquerJour(jour, t.id); setJour(null); }}>
-                <div className="carte" style={{ borderColor: journal[jour] === t.id ? "var(--encre)" : "var(--ligne)" }}>
-                  <div style={{ fontSize: 17, fontWeight: 300 }}>{t.nom}</div>
-                  <div className="bande">
-                    {t.itemIds.slice(0, 5).map((id) => urls[id]
-                      ? <img key={id} src={urls[id]} alt="" loading="lazy" />
-                      : <div key={id} className="vide" />)}
-                  </div>
-                </div>
-              </button>
-            ))}
-            {jour > today && (
-              <BlocPhotoJour jour={jour} urls={urls} champPhoto={champPhoto}
-                enregistrePhoto={enregistrePhoto} retirerPhotoJour={retirerPhotoJour} />
-            )}
-
-            {journal[jour] && (
-              <button className="bouton danger" style={{ marginTop: 18 }}
-                onClick={async () => { await marquerJour(jour, null); setJour(null); }}>
-                Retirer la tenue de ce jour
-              </button>
-            )}
-
-            <input ref={champPhoto} type="file" accept="image/*"
-              style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
-              onChange={(e) => { traiterPhoto(e.target.files); e.target.value = ""; }} />
+          <div className="mois">
+            <button onClick={() => bougerSemaine(-1)} aria-label="Semaine précédente"
+              style={{ fontSize: 20, color: "var(--gris)", padding: "4px 12px" }}>‹</button>
+            <span>{titreSemaine}</span>
+            <button onClick={() => bougerSemaine(1)} aria-label="Semaine suivante"
+              style={{ fontSize: 20, color: "var(--gris)", padding: "4px 12px" }}>›</button>
           </div>
+
+          {!semaineCourante && (
+            <button onClick={() => setAncre(iso(lundiDe(new Date())))}
+              style={{ display: "block", margin: "0 auto 14px", fontSize: 12, color: "var(--olive)" }}>
+              Revenir à cette semaine
+            </button>
+          )}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {septJours.map((date, k) => (
+              <LigneSemaine key={date} date={date} nomJour={JOURS_COURTS[k]} aujourdhui={date === today}
+                creneaux={creneauxDu(date)} tenues={tenues} imageTenue={imageTenue}
+                ouvrir={() => setJour(date)} />
+            ))}
+          </div>
+
+          <p className="note" style={{ marginTop: 16 }}>
+            Touche un jour pour y ajouter une tenue, un moment et une note.
+            Une journée peut contenir plusieurs créneaux.
+          </p>
+        </>
+      ) : (
+        <>
+          <div className="mois">
+            <button onClick={() => bougerMois(-1)} aria-label="Mois précédent"
+              style={{ fontSize: 20, color: "var(--gris)", padding: "4px 12px" }}>‹</button>
+            <span>{MOIS[curseur.m]} {curseur.a}</span>
+            <button onClick={() => bougerMois(1)} aria-label="Mois suivant"
+              style={{ fontSize: 20, color: "var(--gris)", padding: "4px 12px" }}>›</button>
+          </div>
+          <div className="calendrier">{JOURS.map((d, k) => <div className="jourNom" key={k}>{d}</div>)}</div>
+          <div className="calendrier" style={{ marginTop: 2 }}>
+            {cases.map((n, k) => {
+              if (!n) return <div key={k} />;
+              const date = iso(new Date(curseur.a, curseur.m, n));
+              const v = vignette(date);
+              const combien = creneauxDu(date).length;
+              return (
+                <button className="jour" key={k} onClick={() => setJour(date)}
+                  data-aujourdhui={date === today ? "1" : "0"}
+                  data-prevu={date > today && combien ? "1" : "0"}
+                  data-img={v ? "1" : "0"}>
+                  <em>{n}</em>
+                  {v && <img src={v} alt="" loading="lazy" />}
+                  {combien > 1 && (
+                    <span style={{
+                      position: "absolute", bottom: 3, right: 4, zIndex: 2, fontSize: 10,
+                      color: v ? "#fff" : "var(--gris)",
+                      textShadow: v ? "0 1px 3px rgba(0,0,0,.8)" : "none",
+                    }}>{combien}</span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          <p className="note" style={{ marginTop: 16 }}>
+            Cadre plein : tenue portée. Cadre pointillé : tenue prévue. Le chiffre indique
+            le nombre de créneaux quand la journée en compte plusieurs.
+          </p>
         </>
       )}
+
+      {jour && (
+        <PanneauJour key={jour} jour={jour} today={today} creneaux={creneauxDu(jour)}
+          tenues={tenues} pieces={pieces} urls={urls} imageTenue={imageTenue}
+          preselection={preselection}
+          ajouterCreneau={ajouterCreneau} majCreneau={majCreneau} retirerCreneau={retirerCreneau}
+          champPhoto={champPhoto} enregistrePhoto={enregistrePhoto} retirerPhotoJour={retirerPhotoJour}
+          composer={() => { setCompo(jour); setJour(null); }}
+          fermer={() => { setJour(null); setPreselection(null); }} />
+      )}
+
+      <input ref={champPhoto} type="file" accept="image/*"
+        style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
+        onChange={(e) => { traiterPhoto(e.target.files); e.target.value = ""; }} />
 
       {compo && (
         <Compositeur pieces={pieces} urls={urls} ajouterTenue={ajouterTenue}
           dateDefaut={compo}
-          apres={async (t) => { await marquerJour(compo, t.id); }}
-          fermer={() => setCompo(null)} />
+          apres={async (t) => { setPreselection(t.id); }}
+          fermer={() => { setJour(compo); setCompo(null); }} />
       )}
+    </div>
+  );
+}
+
+/* Une journée de la vue semaine : le jour à gauche, ses créneaux à la suite. */
+function LigneSemaine({ date, nomJour, aujourdhui, creneaux, tenues, imageTenue, ouvrir }) {
+  return (
+    <div style={{
+      display: "flex", gap: 12, alignItems: "flex-start", background: "#fff",
+      border: `1px solid ${aujourdhui ? "var(--encre)" : "var(--ligne)"}`,
+      borderRadius: 1, padding: "10px 12px",
+    }}>
+      <button onClick={ouvrir} style={{ width: 44, flexShrink: 0, textAlign: "left", padding: 0 }}>
+        <div style={{ fontSize: 11, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--gris)" }}>
+          {nomJour}
+        </div>
+        <div style={{ fontSize: 20, fontWeight: 300, color: aujourdhui ? "var(--encre)" : "var(--doux)" }}>
+          {Number(date.split("-")[2])}
+        </div>
+      </button>
+
+      {creneaux.length ? (
+        <div style={{ flex: 1, display: "flex", gap: 8, overflowX: "auto", paddingBottom: 2 }}>
+          {creneaux.map((c) => {
+            const img = imageTenue(c.tenueId);
+            const t = tenues.find((x) => x.id === c.tenueId);
+            return (
+              <button key={c.id} onClick={ouvrir}
+                style={{ width: 62, flexShrink: 0, textAlign: "left", padding: 0 }}>
+                <div style={{ width: 62, height: 82, background: "#E5E1D8", borderRadius: 1, overflow: "hidden" }}>
+                  {img && <img src={img} alt="" loading="lazy"
+                    style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--encre)", marginTop: 4, lineHeight: 1.3 }}>{c.libelle}</div>
+                {t && <div style={{ fontSize: 10, color: "var(--gris)", lineHeight: 1.3 }}>{t.nom}</div>}
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <button onClick={ouvrir} style={{
+          flex: 1, textAlign: "left", fontSize: 12, color: "var(--gris)",
+          border: "1px dashed var(--ligne)", borderRadius: 1, padding: "14px 12px",
+        }}>Ajouter une tenue</button>
+      )}
+    </div>
+  );
+}
+
+/* Détail d'une journée : ses créneaux, l'ajout d'un créneau, la photo portée. */
+function PanneauJour({ jour, today, creneaux, tenues, pieces, urls, imageTenue, preselection,
+  ajouterCreneau, majCreneau, retirerCreneau,
+  champPhoto, enregistrePhoto, retirerPhotoJour, composer, fermer }) {
+  const [choix, setChoix] = useState(preselection || null); // tenue en cours d'ajout
+  const [edition, setEdition] = useState(null);             // créneau en cours de modification
+  const [confirme, setConfirme] = useState(null);
+
+  const passe = jour <= today;
+  const blocPhoto = (
+    <BlocPhotoJour jour={jour} urls={urls} champPhoto={champPhoto}
+      enregistrePhoto={enregistrePhoto} retirerPhotoJour={retirerPhotoJour} />
+  );
+
+  return (
+    <>
+      <div className="rideau" onClick={fermer} />
+      <div className="panneau">
+        <div className="poignee" />
+        <h2 style={{ fontWeight: 300, fontSize: 20, margin: "0 0 6px" }}>{joli(jour)}</h2>
+        <p className="note" style={{ margin: "0 0 16px" }}>
+          {jour > today ? "Ce que tu prévois de porter." : "Ce que tu as porté."}
+        </p>
+
+        {passe && blocPhoto}
+
+        {creneaux.length > 0 && (
+          <section className="section">
+            <div className="entete">créneaux · {creneaux.length}</div>
+            {creneaux.map((c) => {
+              const t = tenues.find((x) => x.id === c.tenueId);
+              const img = imageTenue(c.tenueId);
+              if (edition === c.id) {
+                return (
+                  <FormulaireCreneau key={c.id} depart={c} tenue={t} valider={async (v) => {
+                    await majCreneau(jour, c.id, v);
+                    setEdition(null);
+                  }} annuler={() => setEdition(null)} texteValider="Enregistrer" />
+                );
+              }
+              return (
+                <div className="carte" key={c.id}>
+                  <div style={{ display: "flex", gap: 12 }}>
+                    <div style={{ width: 54, height: 72, flexShrink: 0, background: "#E5E1D8", overflow: "hidden" }}>
+                      {img && <img src={img} alt="" loading="lazy"
+                        style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />}
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 11, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--gris)" }}>
+                        {c.libelle}
+                      </div>
+                      <div style={{ fontSize: 17, fontWeight: 300, marginTop: 2 }}>
+                        {t ? t.nom : "Tenue introuvable"}
+                      </div>
+                      {c.note && <p className="note" style={{ margin: "4px 0 0" }}>{c.note}</p>}
+                    </div>
+                  </div>
+                  <div className="duo" style={{ marginTop: 12 }}>
+                    <button className="bouton discret" onClick={() => setEdition(c.id)}>Modifier</button>
+                    {confirme === c.id
+                      ? <button className="bouton danger" onClick={async () => {
+                          await retirerCreneau(jour, c.id); setConfirme(null);
+                        }}>Confirmer</button>
+                      : <button className="bouton danger" onClick={() => setConfirme(c.id)}>Retirer</button>}
+                  </div>
+                </div>
+              );
+            })}
+          </section>
+        )}
+
+        <section className="section">
+          <div className="entete">{creneaux.length ? "ajouter un autre créneau" : "ajouter un créneau"}</div>
+
+          {choix ? (
+            <FormulaireCreneau tenue={tenues.find((x) => x.id === choix)}
+              valider={async (v) => { await ajouterCreneau(jour, { tenueId: choix, ...v }); setChoix(null); }}
+              annuler={() => setChoix(null)} texteValider="Ajouter à cette journée" />
+          ) : (
+            <>
+              <button className="bouton contour" disabled={!pieces.length} onClick={composer}>
+                {pieces.length ? "Composer à partir de ma garde-robe" : "Ajoute d'abord une pièce"}
+              </button>
+
+              {tenues.length > 0 && (
+                <div className="entete" style={{ marginTop: 22 }}>ou reprendre une tenue</div>
+              )}
+              {tenues.map((t) => (
+                <button key={t.id} style={{ display: "block", width: "100%", textAlign: "left" }}
+                  onClick={() => setChoix(t.id)}>
+                  <div className="carte">
+                    <div style={{ fontSize: 17, fontWeight: 300 }}>{t.nom}</div>
+                    <div className="bande">
+                      {t.itemIds.slice(0, 5).map((id) => urls[id]
+                        ? <img key={id} src={urls[id]} alt="" loading="lazy" />
+                        : <div key={id} className="vide" />)}
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </>
+          )}
+        </section>
+
+        {!passe && blocPhoto}
+      </div>
+    </>
+  );
+}
+
+/* Moment et note d'un créneau. Le libellé appartient au créneau, pas à la tenue. */
+function FormulaireCreneau({ depart, tenue, valider, annuler, texteValider }) {
+  const [libelle, setLibelle] = useState((depart && depart.libelle) || LIBELLE_DEFAUT);
+  const [note, setNote] = useState((depart && depart.note) || "");
+
+  return (
+    <div className="carte">
+      {tenue && <div style={{ fontSize: 17, fontWeight: 300, marginBottom: 12 }}>{tenue.nom}</div>}
+
+      <div className="champ">
+        <label>Moment</label>
+        <div className="pastilles">
+          {LIBELLES.map((l) => (
+            <button key={l} className="pastille" data-actif={libelle === l ? "1" : "0"}
+              onClick={() => setLibelle(l)}>{l}</button>
+          ))}
+        </div>
+      </div>
+
+      <div className="champ">
+        <label>Ou un moment à toi</label>
+        <input value={libelle} onChange={(e) => setLibelle(e.target.value)} placeholder="Brunch, mariage…" />
+      </div>
+
+      <div className="champ">
+        <label>Note</label>
+        <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="facultative" />
+      </div>
+
+      <div className="duo">
+        <button className="bouton discret" onClick={annuler}>Annuler</button>
+        <button className="bouton plein" onClick={() => valider({ libelle, note })}>{texteValider}</button>
+      </div>
     </div>
   );
 }
@@ -823,7 +1088,7 @@ function BlocPhotoJour({ jour, urls, champPhoto, enregistrePhoto, retirerPhotoJo
 /* ------------------------------------------------------------------ suggestions */
 
 function VueIdees(c) {
-  const { pieces, tenues, journal, stats, ajouterTenue, marquerJour, setErreur, setOuvert, urls } = c;
+  const { pieces, tenues, journal, stats, ajouterTenue, ajouterCreneau, setErreur, setOuvert, urls } = c;
   const [contexte, setContexte] = useState("");
   const [charge, setCharge] = useState(false);
   const [propositions, setPropositions] = useState([]);
@@ -833,9 +1098,13 @@ function VueIdees(c) {
   const demander = async () => {
     setCharge(true); setPropositions([]);
     const today = iso(new Date());
-    const recentes = [...new Set(Object.entries(journal)
-      .filter(([d]) => d <= today).sort().slice(-6)
-      .flatMap(([, tid]) => tenues.find((t) => t.id === tid)?.itemIds || []))];
+    // Les six derniers créneaux passés, pour éviter de reproposer ce qui vient
+    // d'être porté. Une journée à deux tenues pèse donc deux créneaux.
+    const recentes = [...new Set(creneauxAPlat(journal)
+      .filter((c2) => c2.date <= today)
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+      .slice(-6)
+      .flatMap((c2) => tenues.find((t) => t.id === c2.tenueId)?.itemIds || []))];
     try {
       const r = await suggerer({ pieces, contexte, recentes, date: joli(today) });
       if (!r.length) setErreur("Aucune proposition exploitable. Reformule le contexte ou ajoute des pièces.");
@@ -875,7 +1144,7 @@ function VueIdees(c) {
                       <button className="bouton discret"
                         onClick={async () => {
                           const n = await ajouterTenue({ nom: t.nom, itemIds: t.itemIds, note: t.pourquoi });
-                          await marquerJour(iso(new Date()), n.id);
+                          await ajouterCreneau(iso(new Date()), { tenueId: n.id, libelle: LIBELLE_DEFAUT });
                         }}>Je la porte</button>
                     </div>
                   } />
@@ -931,6 +1200,7 @@ function VueDonnees({ pieces, tenues, journal, setErreur }) {
   const champ = useRef(null);
 
   const jours = Object.keys(journal || {}).length;
+  const creneaux = creneauxAPlat(journal).length;
 
   const enregistrerCode = () => {
     codeLocal.ecrire(code.trim());
@@ -1008,7 +1278,7 @@ function VueDonnees({ pieces, tenues, journal, setErreur }) {
           que tu gardes ailleurs : il contient tes fiches, tes tenues, ton journal et tes photos.
         </p>
         <p className="note">
-          {pieces.length} pièces · {tenues.length} tenues · {jours} jour(s) au journal
+          {pieces.length} pièces · {tenues.length} tenues · {creneaux} créneau(x) sur {jours} jour(s)
           {place && place.total ? ` · ${poids(place.utilise)} utilisés` : ""}
         </p>
         <button className="bouton plein" disabled={occupe || !pieces.length} onClick={exporter}>
@@ -1042,7 +1312,8 @@ function VueDonnees({ pieces, tenues, journal, setErreur }) {
             <h2 style={{ fontWeight: 300, fontSize: 22, margin: "0 0 8px" }}>Remplacer le catalogue ?</h2>
             <p className="note" style={{ margin: "0 0 16px" }}>
               Cette sauvegarde contient {enAttente.resume.pieces} pièces, {enAttente.resume.tenues} tenues,
-              {" "}{enAttente.resume.photos} photos et {enAttente.resume.jours} jour(s) de journal.
+              {" "}{enAttente.resume.photos} photos et {enAttente.resume.creneaux} créneau(x)
+              répartis sur {enAttente.resume.jours} jour(s).
               {enAttente.resume.exporte ? ` Exportée le ${enAttente.resume.exporte.slice(0, 10)}.` : ""}
             </p>
             <p className="note" style={{ margin: "0 0 16px", color: "var(--alerte)" }}>
