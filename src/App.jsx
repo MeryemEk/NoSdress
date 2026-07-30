@@ -238,6 +238,22 @@ export default function App() {
   );
 }
 
+/* Fermeture d'un panneau. Remplace l'ancienne poignée, qui suggérait un glissement
+   sans en offrir un. Zone tactile d'environ 44 px, la taille visée sur iPhone. */
+function BoutonFermer({ onClick, desactive }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "flex-end", margin: "0 -8px 6px 0", minHeight: 34 }}>
+      {onClick && (
+        <button onClick={onClick} disabled={desactive} aria-label="Fermer"
+          style={{
+            fontSize: 24, lineHeight: 1, color: "var(--gris)",
+            padding: "6px 12px", opacity: desactive ? 0.35 : 1,
+          }}>×</button>
+      )}
+    </div>
+  );
+}
+
 function ChampCode({ onOk }) {
   const [v, setV] = useState(codeLocal.lire());
   return (
@@ -367,7 +383,7 @@ function Ajout({ ajouterPiece, fermer, setErreur }) {
     <>
       <div className="rideau" onClick={etape === "choix" || etape === "fiche" ? fermer : undefined} />
       <div className="panneau">
-        <div className="poignee" />
+        <BoutonFermer onClick={etape === "choix" || etape === "fiche" ? fermer : null} />
 
         {etape === "choix" && (
           <>
@@ -528,7 +544,7 @@ function FichePiece({ id, pieces, urls, stats, majPiece, supprimerPiece, setOuve
     <>
       <div className="rideau" onClick={() => setOuvert(null)} />
       <div className="panneau">
-        <div className="poignee" />
+        <BoutonFermer onClick={() => setOuvert(null)} />
         {edition ? (
           <Formulaire depart={p} apercu={urls[id]}
             valider={async (f) => {
@@ -649,7 +665,7 @@ function Compositeur({ pieces, urls, ajouterTenue, fermer, dateDefaut, apres }) 
     <>
       <div className="rideau" onClick={fermer} />
       <div className="panneau">
-        <div className="poignee" />
+        <BoutonFermer onClick={fermer} />
         <h2 style={{ fontWeight: 300, fontSize: 22, margin: "0 0 8px" }}>Composer une tenue</h2>
         <p className="note" style={{ margin: "0 0 16px" }}>
           {dateDefaut ? `Une pièce suffit. Elle sera assignée au ${joli(dateDefaut)}.` : "Une pièce suffit."}
@@ -921,7 +937,7 @@ function PanneauJour({ jour, today, creneaux, tenues, pieces, urls, imageTenue, 
     <>
       <div className="rideau" onClick={fermer} />
       <div className="panneau">
-        <div className="poignee" />
+        <BoutonFermer onClick={fermer} />
         <h2 style={{ fontWeight: 300, fontSize: 20, margin: "0 0 6px" }}>{joli(jour)}</h2>
         <p className="note" style={{ margin: "0 0 16px" }}>
           {jour > today ? "Ce que tu prévois de porter." : "Ce que tu as porté."}
@@ -1308,7 +1324,7 @@ function VueDonnees({ pieces, tenues, journal, setErreur }) {
         <>
           <div className="rideau" onClick={() => !occupe && setEnAttente(null)} />
           <div className="panneau">
-            <div className="poignee" />
+            <BoutonFermer onClick={() => setEnAttente(null)} desactive={occupe} />
             <h2 style={{ fontWeight: 300, fontSize: 22, margin: "0 0 8px" }}>Remplacer le catalogue ?</h2>
             <p className="note" style={{ margin: "0 0 16px" }}>
               Cette sauvegarde contient {enAttente.resume.pieces} pièces, {enAttente.resume.tenues} tenues,
