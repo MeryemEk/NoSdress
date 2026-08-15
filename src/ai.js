@@ -137,21 +137,49 @@ export async function lirePage(url) {
   }
 }
 
+/* Saisons codées sur une lettre, * quand la pièce se porte toute l'année. */
+const codeSaisons = (s) => (Array.isArray(s) && s.length && s.length < 4
+  ? s.map((x) => (x === "Été" ? "E" : x[0])).join("")
+  : "*");
+
+/* Une ligne par pièce plutôt qu'un objet JSON. Même information, environ trois
+   fois moins de texte envoyé : le JSON répète les noms de champs et les
+   guillemets pour chaque pièce, ce qui devient coûteux sur une grande
+   garde-robe. C'est ce qui garde le prix d'une demande à peu près stable. */
+function catalogueCompact(pieces) {
+  return pieces.map((p) => [
+    p.id,
+    CATS.includes(p.categorie) ? p.categorie : "Haut",
+    p.sousCategorie || p.nom || "",
+    (p.couleurs || []).join("/"),
+    codeSaisons(p.saisons),
+    Number(p.formalite) >= 1 && Number(p.formalite) <= 5 ? Number(p.formalite) : 3,
+    (p.styles || []).slice(0, 2).join("/"),
+  ].join("|")).join("\n");
+}
+
 export async function suggerer({ pieces, contexte, recentes, date }) {
-  const catalogue = pieces.map((p) => ({
-    id: p.id, nom: p.nom, categorie: p.categorie, couleurs: p.couleurs,
-    marque: p.marque || undefined, styles: p.styles, saisons: p.saisons, formalite: p.formalite,
-  }));
-  const prompt = `Voici ma garde-robe, en JSON :
-${JSON.stringify(catalogue)}
+  const prompt = `Ma garde-robe complète, une pièce par ligne, colonnes séparées par | :
+id|catégorie|type|couleurs|saisons|formalité|styles
+Saisons : P printemps, E été, A automne, H hiver, * toute l'année.
+Formalité : 1 très décontracté à 5 très habillé.
+
+${catalogueCompact(pieces)}
 
 Contexte pour aujourd'hui : ${contexte || "journée ordinaire, pas de contrainte particulière"}
-Pièces portées récemment, à éviter si possible : ${JSON.stringify(recentes)}
 Nous sommes le ${date}.
+Pièces portées ces derniers jours : ${recentes.length ? recentes.join(", ") : "aucune"}
 
-Compose 3 tenues cohérentes en utilisant uniquement les identifiants ci-dessus.
-Chaque tenue contient soit une robe soit un haut et un bas, des chaussures si la garde-robe en contient,
-et 0 à 2 accessoires. Reste cohérente sur le registre de formalité et sur la saison.
+Compose 3 tenues en puisant dans TOUTE la garde-robe ci-dessus. Chaque pièce est
+disponible, y compris celles portées récemment et celles portées souvent : ne t'interdis
+aucune pièce. Les pièces portées ces derniers jours sont indiquées uniquement pour que
+les 3 propositions ne soient pas la copie de ce que je viens de porter ; réutilise-les
+sans hésiter si elles servent la tenue. Cherche surtout à ce que les 3 propositions
+soient différentes entre elles.
+
+Chaque tenue contient soit une robe soit un haut et un bas, des chaussures si la
+garde-robe en contient, et 0 à 2 accessoires. Reste cohérente sur le registre de
+formalité et sur la saison.
 Réponds uniquement avec un objet JSON valide, sans texte autour ni balise markdown :
 {"tenues":[{"nom":"nom court en français","itemIds":["id","id"],"pourquoi":"une phrase courte"}]}`;
   const brut = await appeler([{ type: "text", text: prompt }], { tokens: 1500 });

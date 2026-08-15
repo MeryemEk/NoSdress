@@ -1171,6 +1171,10 @@ function VueIdees(c) {
           {jamais.length > 0 && (
             <section className="section">
               <div className="entete">jamais portées · {jamais.length}</div>
+              <p className="note" style={{ marginTop: 0 }}>
+                Simple rappel : les propositions ci-dessus puisent dans toute la garde-robe,
+                pas seulement ici.
+              </p>
               <div className="grille">
                 {jamais.slice(0, 8).map((p) => (
                   <button className="piece" key={p.id} onClick={() => setOuvert(p.id)}>
