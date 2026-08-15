@@ -29,15 +29,57 @@ export const codeLocal = {
   ecrire: (v) => localStorage.setItem("dressing:code", v),
 };
 
-function extraireJSON(texte) {
-  const propre = texte.replace(/```json/g, "").replace(/```/g, "").trim();
-  const fin = propre.lastIndexOf("}");
-  if (fin < 0) throw new Error("réponse illisible");
-  for (let i = 0; i < fin; i++) {
-    if (propre[i] !== "{") continue;
-    try { return JSON.parse(propre.slice(i, fin + 1)); } catch (e) { /* candidat suivant */ }
+/* Parcourt un texte en ignorant ce qui se trouve entre guillemets, et rend la
+   liste des fermetures encore attendues. Sert à réparer une réponse coupée. */
+function fermeturesManquantes(s) {
+  const pile = [];
+  let dansTexte = false, echappe = false;
+  for (const ch of s) {
+    if (echappe) { echappe = false; continue; }
+    if (dansTexte) {
+      if (ch === "\\") echappe = true;
+      else if (ch === '"') dansTexte = false;
+      continue;
+    }
+    if (ch === '"') dansTexte = true;
+    else if (ch === "{") pile.push("}");
+    else if (ch === "[") pile.push("]");
+    else if (ch === "}" || ch === "]") pile.pop();
   }
-  throw new Error("réponse illisible");
+  return { pile, dansTexte };
+}
+
+function extraireJSON(texte) {
+  const propre = String(texte || "").replace(/```json/gi, "").replace(/```/g, "").trim();
+  if (!propre) throw new Error("le modèle n'a rien renvoyé");
+
+  const debut = propre.indexOf("{");
+  if (debut < 0) throw new Error(`réponse sans JSON : « ${propre.slice(0, 100)} »`);
+  const corps = propre.slice(debut);
+
+  // 1) Cas normal : on tente chaque accolade fermante, de la dernière vers le début.
+  for (let fin = corps.lastIndexOf("}"); fin > 0; fin = corps.lastIndexOf("}", fin - 1)) {
+    try { return JSON.parse(corps.slice(0, fin + 1)); } catch (e) { /* candidat suivant */ }
+  }
+
+  // 2) Réponse coupée en cours de route : on referme ce qui est resté ouvert.
+  //    On essaie le texte tel quel, puis des coupes de plus en plus courtes,
+  //    après chaque objet complet puis avant chaque virgule, de façon à jeter
+  //    un dernier élément écrit à moitié.
+  const candidats = [corps];
+  for (let f = corps.lastIndexOf("}"), n = 0; f > 0 && n < 40; f = corps.lastIndexOf("}", f - 1), n++) {
+    candidats.push(corps.slice(0, f + 1));
+  }
+  for (let f = corps.lastIndexOf(","), n = 0; f > 0 && n < 40; f = corps.lastIndexOf(",", f - 1), n++) {
+    candidats.push(corps.slice(0, f));
+  }
+  for (const base of candidats) {
+    const { pile, dansTexte } = fermeturesManquantes(base);
+    if (dansTexte || !pile.length) continue;
+    try { return JSON.parse(base + pile.reverse().join("")); } catch (e) { /* candidat suivant */ }
+  }
+
+  throw new Error(`réponse illisible : « ${propre.slice(0, 100)}… »`);
 }
 
 async function appeler(contenu, { web = false, tokens = 1200 } = {}) {
@@ -53,11 +95,30 @@ async function appeler(contenu, { web = false, tokens = 1200 } = {}) {
       body: JSON.stringify(corps),
       signal: stop.signal,
     });
-    const data = await r.json();
+    const data = await r.json().catch(() => ({}));
     if (r.status === 401) throw new Error("Code d'accès refusé");
-    if (!r.ok) throw new Error(data.error || "Appel refusé");
-    const texte = (data.content || []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
-    return extraireJSON(texte);
+    if (!r.ok) {
+      // L'API renvoie parfois une chaîne, parfois un objet {type, message}.
+      const detail = typeof data.error === "string" ? data.error
+        : (data.error && data.error.message) || data.detail || "";
+      throw new Error(detail ? `Appel refusé : ${detail}` : `Appel refusé (code ${r.status})`);
+    }
+
+    const blocs = Array.isArray(data.content) ? data.content : [];
+    const texte = blocs.filter((c) => c.type === "text").map((c) => c.text).join("\n");
+    const coupee = data.stop_reason === "max_tokens";
+
+    if (!texte.trim()) {
+      throw new Error(coupee
+        ? "Réponse coupée avant d'avoir rien produit. Réessaie."
+        : "Le modèle n'a renvoyé aucun texte. Réessaie.");
+    }
+    try {
+      return extraireJSON(texte);
+    } catch (e) {
+      if (coupee) throw new Error("Réponse coupée avant la fin, la liste était trop longue. Réessaie.");
+      throw e;
+    }
   } finally {
     clearTimeout(minuteur);
   }
@@ -182,7 +243,7 @@ garde-robe en contient, et 0 à 2 accessoires. Reste cohérente sur le registre 
 formalité et sur la saison.
 Réponds uniquement avec un objet JSON valide, sans texte autour ni balise markdown :
 {"tenues":[{"nom":"nom court en français","itemIds":["id","id"],"pourquoi":"une phrase courte"}]}`;
-  const brut = await appeler([{ type: "text", text: prompt }], { tokens: 1500 });
+  const brut = await appeler([{ type: "text", text: prompt }], { tokens: 2000 });
   return (brut.tenues || [])
     .map((t) => ({ ...t, itemIds: (t.itemIds || []).filter((id) => pieces.some((p) => p.id === id)) }))
     .filter((t) => t.itemIds.length >= 1);
