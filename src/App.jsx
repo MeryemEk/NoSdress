@@ -177,6 +177,33 @@ export default function App() {
     });
   };
 
+  /* La Cave : les pièces rangées hors saison sortent de la garde-robe courante
+     mais restent dans la base. L'historique et les tenues qui les contiennent
+     ne sont pas touchés, seule leur disponibilité change. */
+  const rangerEnCave = async (ids, sac) => {
+    const nom = (sac || "").trim() || "Sans nom";
+    const depuis = iso(new Date());
+    const vises = new Set(ids);
+    const modifiees = boite.current.pieces
+      .filter((p) => vises.has(p.id))
+      .map((p) => ({ ...p, cave: { sac: nom, depuis } }));
+    for (const p of modifiees) await poser("pieces", p);
+    const parId = new Map(modifiees.map((p) => [p.id, p]));
+    boite.current.pieces = boite.current.pieces.map((p) => parId.get(p.id) || p);
+    rafraichir();
+  };
+
+  const sortirDeCave = async (ids) => {
+    const vises = new Set(ids);
+    const modifiees = boite.current.pieces
+      .filter((p) => vises.has(p.id))
+      .map((p) => { const n = { ...p }; delete n.cave; return n; });
+    for (const p of modifiees) await poser("pieces", p);
+    const parId = new Map(modifiees.map((p) => [p.id, p]));
+    boite.current.pieces = boite.current.pieces.map((p) => parId.get(p.id) || p);
+    rafraichir();
+  };
+
   /* Chaque créneau compte pour un port : deux tenues le même jour comptent
      deux fois, et la même tenue portée matin et soir compte deux fois aussi. */
   const stats = useMemo(() => {
@@ -196,12 +223,20 @@ export default function App() {
     return { parTenue, parPiece };
   }, [journal, tenues]);
 
+  const actives = pieces.filter((p) => !p.cave);
+  const enCave = pieces.filter((p) => p.cave);
+  // Noms de sacs déjà utilisés, pour les reproposer au lieu de les retaper.
+  const sacs = [...new Set(enCave.map((p) => p.cave.sac))].sort((a, b) => a.localeCompare(b, "fr"));
+
   const c = {
-    pieces, tenues, journal, urls, stats, setVue, setOuvert, setErreur,
-    piece: (id) => pieces.find((p) => p.id === id),
+    // pieces ne contient que la garde-robe courante : tout ce qui composait déjà
+    // l'application ignore donc la cave sans autre changement.
+    pieces: actives, toutes: pieces, cave: enCave, sacs,
+    tenues, journal, urls, stats, setVue, setOuvert, setErreur,
+    piece: (id) => pieces.find((p) => p.id === id), // cherche aussi dans la cave
     ajouterPiece, majPiece, supprimerPiece, ajouterTenue, supprimerTenue,
     ajouterCreneau, majCreneau, retirerCreneau,
-    ajouterPhotoJour, retirerPhotoJour,
+    ajouterPhotoJour, retirerPhotoJour, rangerEnCave, sortirDeCave,
   };
 
   return (
@@ -209,7 +244,8 @@ export default function App() {
       <header className="haut">
         <h1>dressing</h1>
         <nav className="onglets">
-          {[["pieces", "pièces"], ["tenues", "tenues"], ["calendrier", "calendrier"], ["idees", "suggestions"], ["donnees", "données"]]
+          {[["pieces", "pièces"], ["tenues", "tenues"], ["calendrier", "calendrier"],
+            ["idees", "suggestions"], ["cave", "cave"], ["donnees", "données"]]
             .map(([k, l]) => (
               <button key={k} className="onglet" data-actif={vue === k ? "1" : "0"} onClick={() => setVue(k)}>{l}</button>
             ))}
@@ -231,6 +267,7 @@ export default function App() {
         : vue === "tenues" ? <VueTenues {...c} />
         : vue === "calendrier" ? <VueCalendrier {...c} />
         : vue === "idees" ? <VueIdees {...c} />
+        : vue === "cave" ? <VueCave {...c} />
         : <VueDonnees {...c} />}
 
       {ouvert && <FichePiece {...c} id={ouvert} />}
@@ -267,13 +304,129 @@ function ChampCode({ onOk }) {
   );
 }
 
+/* ------------------------------------------------------------------ cave */
+
+/* Choix du sac de rangement. Les sacs déjà utilisés sont proposés en boutons
+   pour éviter les doublons dus à une faute de frappe. */
+function FormulaireSac({ sacs, depart, combien, valider, annuler }) {
+  const [sac, setSac] = useState(depart || "");
+
+  // Si le nom saisi correspond à un sac existant à la casse près, on garde
+  // l'orthographe déjà en place plutôt que d'en créer un second.
+  const normaliser2 = (v) => {
+    const propre = v.trim();
+    const connu = sacs.find((s) => s.toLowerCase() === propre.toLowerCase());
+    return connu || propre;
+  };
+
+  return (
+    <div className="carte">
+      <p className="note" style={{ margin: "0 0 12px" }}>
+        {combien > 1
+          ? `${combien} pièces vont être rangées. Dans quel sac les mets-tu ?`
+          : "Dans quel sac ranges-tu cette pièce ?"}
+      </p>
+
+      {sacs.length > 0 && (
+        <div className="champ">
+          <label>Sacs déjà utilisés</label>
+          <div className="pastilles">
+            {sacs.map((s) => (
+              <button key={s} className="pastille" data-actif={sac.trim().toLowerCase() === s.toLowerCase() ? "1" : "0"}
+                onClick={() => setSac(s)}>{s}</button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="champ">
+        <label>{sacs.length ? "Ou un nouveau sac" : "Nom du sac"}</label>
+        <input value={sac} onChange={(e) => setSac(e.target.value)}
+          placeholder="Sac bleu du haut, carton hiver…" />
+      </div>
+
+      <div className="duo">
+        <button className="bouton discret" onClick={annuler}>Annuler</button>
+        <button className="bouton plein" disabled={!sac.trim()}
+          onClick={() => valider(normaliser2(sac))}>Ranger à la cave</button>
+      </div>
+    </div>
+  );
+}
+
+function VueCave({ cave, sacs, urls, setOuvert, sortirDeCave, setVue }) {
+  const [confirme, setConfirme] = useState(null);
+
+  if (!cave.length) {
+    return (
+      <div className="corps">
+        <div className="vide-etat">
+          <p className="note" style={{ marginTop: 0 }}>
+            La cave est vide. Range ici ce que tu ne portes pas en ce moment, hors saison
+            ou mis de côté : ces pièces sortent de la garde-robe et des suggestions,
+            sans être supprimées.
+          </p>
+          <button className="bouton plein" onClick={() => setVue("pieces")}>Aller à la garde-robe</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="corps">
+      <p className="note" style={{ marginTop: 0 }}>
+        {cave.length} pièce(s) rangée(s) dans {sacs.length} sac(s). Elles n'apparaissent ni dans
+        la garde-robe, ni dans les suggestions, tant qu'elles sont ici.
+      </p>
+
+      {sacs.map((s) => {
+        const dedans = cave.filter((p) => p.cave.sac === s);
+        return (
+          <section className="section" key={s}>
+            <div className="entete">{s} · {dedans.length}</div>
+            <div className="grille">
+              {dedans.map((p) => (
+                <button className="piece" key={p.id} onClick={() => setOuvert(p.id)}>
+                  <div className="photo">
+                    {urls[p.id] && <img src={urls[p.id]} alt={p.nom} loading="lazy" />}
+                  </div>
+                  <div className="legende"><b>{p.nom}</b>{p.marque || p.sousCategorie}</div>
+                </button>
+              ))}
+            </div>
+            {confirme === s
+              ? (
+                <div className="duo" style={{ marginTop: 12 }}>
+                  <button className="bouton discret" onClick={() => setConfirme(null)}>Annuler</button>
+                  <button className="bouton plein" onClick={async () => {
+                    await sortirDeCave(dedans.map((p) => p.id));
+                    setConfirme(null);
+                  }}>Confirmer, tout ressortir</button>
+                </div>
+              )
+              : (
+                <button className="bouton discret" style={{ marginTop: 12 }}
+                  onClick={() => setConfirme(s)}>Ressortir tout ce sac</button>
+              )}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ pièces */
 
 function VuePieces(c) {
-  const { pieces, urls, setOuvert } = c;
+  const { pieces, urls, setOuvert, cave, sacs, rangerEnCave, setVue } = c;
   const [ajout, setAjout] = useState(false);
+  const [selection, setSelection] = useState(null); // null = navigation, [] = mode rangement
+  const [sacOuvert, setSacOuvert] = useState(false);
 
   const groupes = CATS.map((k) => [k, pieces.filter((p) => p.categorie === k)]).filter(([, l]) => l.length);
+  const enMode = selection !== null;
+  const basculer = (id) => setSelection(selection.includes(id)
+    ? selection.filter((x) => x !== id) : [...selection, id]);
 
   return (
     <>
@@ -281,29 +434,76 @@ function VuePieces(c) {
         {!pieces.length ? (
           <div className="vide-etat">
             <p className="note" style={{ marginTop: 0 }}>
-              L'armoire est vide. Photographie une première pièce, elle sera identifiée et classée.
+              {cave.length
+                ? `La garde-robe courante est vide, mais ${cave.length} pièce(s) attendent à la cave.`
+                : "L'armoire est vide. Photographie une première pièce, elle sera identifiée et classée."}
             </p>
-            <button className="bouton plein" onClick={() => setAjout(true)}>Ajouter une pièce</button>
+            <button className="bouton plein" onClick={() => (cave.length ? setVue("cave") : setAjout(true))}>
+              {cave.length ? "Ouvrir la cave" : "Ajouter une pièce"}
+            </button>
           </div>
-        ) : groupes.map(([cat, liste]) => (
-          <section className="section" key={cat}>
-            <div className="entete">{cat} · {liste.length}</div>
-            <div className="grille">
-              {liste.map((p) => (
-                <button className="piece" key={p.id} onClick={() => setOuvert(p.id)}>
-                  <div className="photo">{urls[p.id] && <img src={urls[p.id]} alt={p.nom} loading="lazy" />}</div>
-                  <div className="legende"><b>{p.nom}</b>{p.marque || p.sousCategorie}</div>
-                </button>
-              ))}
-            </div>
-          </section>
-        ))}
+        ) : (
+          <>
+            {enMode && (
+              <p className="note" style={{ marginTop: 0 }}>
+                Touche les pièces à ranger, puis choisis le sac.
+              </p>
+            )}
+            {groupes.map(([cat, liste]) => (
+              <section className="section" key={cat}>
+                <div className="entete">{cat} · {liste.length}</div>
+                <div className="grille">
+                  {liste.map((p) => (
+                    <button className="piece" key={p.id}
+                      data-choisie={enMode && selection.includes(p.id) ? "1" : "0"}
+                      onClick={() => (enMode ? basculer(p.id) : setOuvert(p.id))}>
+                      <div className="photo">{urls[p.id] && <img src={urls[p.id]} alt={p.nom} loading="lazy" />}</div>
+                      <div className="legende"><b>{p.nom}</b>{p.marque || p.sousCategorie}</div>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ))}
+          </>
+        )}
       </div>
 
       {pieces.length > 0 && (
         <div className="socle">
-          <button className="bouton plein" onClick={() => setAjout(true)}>Ajouter une pièce</button>
+          {enMode ? (
+            <div className="duo">
+              <button className="bouton discret" onClick={() => { setSelection(null); setSacOuvert(false); }}>
+                Annuler
+              </button>
+              <button className="bouton plein" disabled={!selection.length}
+                onClick={() => setSacOuvert(true)}>
+                Ranger {selection.length || ""} pièce(s)
+              </button>
+            </div>
+          ) : (
+            <div className="duo">
+              <button className="bouton discret" onClick={() => setSelection([])}>Ranger à la cave</button>
+              <button className="bouton plein" onClick={() => setAjout(true)}>Ajouter une pièce</button>
+            </div>
+          )}
         </div>
+      )}
+
+      {sacOuvert && (
+        <>
+          <div className="rideau" onClick={() => setSacOuvert(false)} />
+          <div className="panneau">
+            <BoutonFermer onClick={() => setSacOuvert(false)} />
+            <h2 style={{ fontWeight: 300, fontSize: 22, margin: "0 0 12px" }}>Ranger à la cave</h2>
+            <FormulaireSac sacs={sacs} combien={selection.length}
+              valider={async (sac) => {
+                await rangerEnCave(selection, sac);
+                setSacOuvert(false);
+                setSelection(null);
+              }}
+              annuler={() => setSacOuvert(false)} />
+          </div>
+        </>
       )}
 
       {ajout && <Ajout {...c} fermer={() => setAjout(false)} />}
@@ -533,10 +733,12 @@ function Formulaire({ depart, apercu, valider, annuler }) {
   );
 }
 
-function FichePiece({ id, pieces, urls, stats, majPiece, supprimerPiece, setOuvert, setErreur }) {
-  const p = pieces.find((x) => x.id === id);
+function FichePiece({ id, toutes, urls, stats, majPiece, supprimerPiece, setOuvert, setErreur,
+  sacs, rangerEnCave, sortirDeCave }) {
+  const p = toutes.find((x) => x.id === id);
   const [edition, setEdition] = useState(false);
   const [confirme, setConfirme] = useState(false);
+  const [rangement, setRangement] = useState(false);
   if (!p) return null;
   const u = stats.parPiece[id];
 
@@ -572,8 +774,27 @@ function FichePiece({ id, pieces, urls, stats, majPiece, supprimerPiece, setOuve
                 <dt>Registre</dt><dd>{FORM[p.formalite]}</dd>
                 {p.styles.length > 0 && <><dt>Mots-clés</dt><dd>{p.styles.join(", ")}</dd></>}
                 <dt>Portée</dt><dd>{u ? `${u.n} fois, la dernière le ${joli(u.last)}` : "jamais encore"}</dd>
+                {p.cave && <><dt>Cave</dt><dd>{p.cave.sac}, depuis le {joli(p.cave.depuis)}</dd></>}
               </dl>
             </div>
+
+            <section className="section">
+              {rangement ? (
+                <FormulaireSac sacs={sacs} depart={p.cave ? p.cave.sac : ""} combien={1}
+                  valider={async (sac) => { await rangerEnCave([id], sac); setRangement(false); }}
+                  annuler={() => setRangement(false)} />
+              ) : p.cave ? (
+                <div className="duo">
+                  <button className="bouton discret" onClick={() => setRangement(true)}>Changer de sac</button>
+                  <button className="bouton contour" onClick={async () => { await sortirDeCave([id]); }}>
+                    Remettre dans la garde-robe
+                  </button>
+                </div>
+              ) : (
+                <button className="bouton discret" onClick={() => setRangement(true)}>Ranger à la cave</button>
+              )}
+            </section>
+
             <div className="duo" style={{ marginTop: 18 }}>
               <button className="bouton discret" onClick={() => setEdition(true)}>Modifier</button>
               {confirme
@@ -644,10 +865,23 @@ function CarteTenue({ t, urls, piece, stats, supprimerTenue, action }) {
           : <button style={{ fontSize: 12, color: "var(--gris)" }} onClick={() => setConfirme(true)}>retirer</button>)}
       </div>
       <div className="bande">
-        {t.itemIds.map((id) => urls[id]
-          ? <img key={id} src={urls[id]} alt={piece(id)?.nom || ""} loading="lazy" />
-          : <div key={id} className="vide" />)}
+        {t.itemIds.map((id) => {
+          // Une pièce rangée à la cave reste dans la tenue, en retrait.
+          const rangee = !!piece(id)?.cave;
+          return urls[id]
+            ? <img key={id} src={urls[id]} alt={piece(id)?.nom || ""} loading="lazy"
+                style={rangee ? { opacity: 0.4 } : undefined} />
+            : <div key={id} className="vide" />;
+        })}
       </div>
+      {(() => {
+        const sacsUtiles = [...new Set(t.itemIds.map((id) => piece(id)?.cave?.sac).filter(Boolean))];
+        return sacsUtiles.length > 0 && (
+          <div className="info" style={{ color: "var(--alerte)" }}>
+            Pièce(s) à la cave : {sacsUtiles.join(", ")}
+          </div>
+        );
+      })()}
       <div className="info">{u ? `Portée ${u.n} fois, la dernière le ${joli(u.last)}` : "Jamais portée"}</div>
       {action && <div style={{ marginTop: 12 }}>{action}</div>}
     </div>
