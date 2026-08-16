@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { tout, lire, poser, oter, toutesLesPhotos, compresser, enBase64, base64EnBlob,
+import { tout, lire, poser, oter, toutesLesPhotos, compresser, decouper, enBase64, base64EnBlob,
   exporterDonnees, importerDonnees, resumerSauvegarde, estimerPlace,
   migrerJournal, creneauxAPlat, LIBELLES, LIBELLE_DEFAUT } from "./db.js";
-import { identifier, lirePage, suggerer, normaliser, codeLocal,
+import { identifier, identifierGroupe, lirePage, suggerer, normaliser, codeLocal,
   CATS, SAISONS, FORM, TYPES, MATIERES, COULEURS } from "./ai.js";
 
 const JOURS = ["L", "M", "M", "J", "V", "S", "D"];
@@ -193,6 +193,27 @@ export default function App() {
     rafraichir();
   };
 
+  /* Création en lot depuis une photo de groupe : les pièces naissent
+     directement dans la cave, sans passer par la garde-robe. */
+  const ajouterPiecesEnCave = async (liste, sac) => {
+    const nom = (sac || "").trim() || "Sans nom";
+    const depuis = iso(new Date());
+    const creees = [];
+    for (const { fiche, blob } of liste) {
+      const piece = { ...fiche, id: uid(), ajoute: depuis, cave: { sac: nom, depuis } };
+      delete piece.cadre; // le cadre a servi au découpage, il n'a plus d'usage
+      await poser("pieces", piece);
+      if (blob instanceof Blob) {
+        await poser("photos", blob, piece.id);
+        setUrls((u) => ({ ...u, [piece.id]: URL.createObjectURL(blob) }));
+      }
+      creees.push(piece);
+    }
+    boite.current.pieces = [...creees, ...boite.current.pieces];
+    rafraichir();
+    return creees;
+  };
+
   const sortirDeCave = async (ids) => {
     const vises = new Set(ids);
     const modifiees = boite.current.pieces
@@ -236,7 +257,7 @@ export default function App() {
     piece: (id) => pieces.find((p) => p.id === id), // cherche aussi dans la cave
     ajouterPiece, majPiece, supprimerPiece, ajouterTenue, supprimerTenue,
     ajouterCreneau, majCreneau, retirerCreneau,
-    ajouterPhotoJour, retirerPhotoJour, rangerEnCave, sortirDeCave,
+    ajouterPhotoJour, retirerPhotoJour, rangerEnCave, sortirDeCave, ajouterPiecesEnCave,
   };
 
   return (
@@ -354,8 +375,198 @@ function FormulaireSac({ sacs, depart, combien, valider, annuler }) {
   );
 }
 
-function VueCave({ cave, sacs, urls, setOuvert, sortirDeCave, setVue }) {
+/* Une photo, plusieurs vêtements, un seul appel : l'app détecte les pièces,
+   découpe une vignette pour chacune, puis les crée directement dans un sac. */
+function AjoutGroupe({ sacs, ajouterPiecesEnCave, fermer, setErreur }) {
+  const [etape, setEtape] = useState("choix");
+  const [apercu, setApercu] = useState("");
+  const [trouvees, setTrouvees] = useState([]);  // { fiche, blob, apercu, decoupee, garder }
+  const [sac, setSac] = useState("");
+  const [souci, setSouci] = useState("");
+  const champ = useRef(null);
+
+  const analyser = async (fichiers) => {
+    const f = (fichiers || [])[0];
+    if (!f) return;
+    setSouci("");
+    setEtape("lecture");
+    try {
+      // Résolution plus élevée que pour une pièce seule : chaque vêtement
+      // n'occupe qu'une fraction de l'image et doit rester lisible.
+      const b = await compresser(f, 1600, 0.78);
+      setApercu(URL.createObjectURL(b));
+      setEtape("analyse");
+
+      const liste = await identifierGroupe(await enBase64(b));
+      if (!liste.length) {
+        setEtape("choix");
+        setSouci("Aucun vêtement reconnu sur cette photo. Étale les pièces sur un fond uni, sans les superposer.");
+        return;
+      }
+
+      const preparees = [];
+      for (const fiche of liste) {
+        const morceau = await decouper(b, fiche.cadre);
+        preparees.push({
+          fiche,
+          blob: morceau || b,
+          apercu: morceau ? URL.createObjectURL(morceau) : URL.createObjectURL(b),
+          decoupee: !!morceau,
+          garder: true,
+        });
+      }
+      setTrouvees(preparees);
+      setEtape("verif");
+    } catch (e) {
+      setEtape("choix");
+      setSouci(e && e.message ? e.message : String(e));
+    }
+  };
+
+  const modifier = (k, modif) => setTrouvees((l) => l.map((x, i) => (i === k ? { ...x, ...modif } : x)));
+  const retenues = trouvees.filter((x) => x.garder);
+  const sansDecoupe = retenues.filter((x) => !x.decoupee).length;
+
+  const enregistrer = async () => {
+    setEtape("enregistrement");
+    try {
+      await ajouterPiecesEnCave(retenues.map((x) => ({ fiche: x.fiche, blob: x.blob })), sac);
+      fermer();
+    } catch (e) {
+      setEtape("verif");
+      setErreur("Enregistrement impossible : " + (e && e.message ? e.message : e));
+    }
+  };
+
+  return (
+    <>
+      <div className="rideau" onClick={etape === "choix" || etape === "verif" ? fermer : undefined} />
+      <div className="panneau">
+        <BoutonFermer onClick={etape === "choix" || etape === "verif" ? fermer : null} />
+
+        {etape === "choix" && (
+          <>
+            <h2 style={{ fontWeight: 300, fontSize: 22, margin: "0 0 8px" }}>Remplir un sac depuis une photo</h2>
+            <p className="note" style={{ margin: "0 0 18px" }}>
+              Étale le contenu du sac sur un fond uni, les pièces côte à côte sans se
+              chevaucher, puis photographie l'ensemble. Une seule analyse suffit pour tout
+              le sac, c'est moins cher que pièce par pièce.
+            </p>
+            <button className="bouton plein" onClick={() => champ.current && champ.current.click()}>
+              Choisir la photo du sac
+            </button>
+            {souci && <p className="note" style={{ marginTop: 12, color: "var(--alerte)" }}>{souci}</p>}
+          </>
+        )}
+
+        {(etape === "lecture" || etape === "analyse" || etape === "enregistrement") && (
+          <div style={{ display: "flex", gap: 12, alignItems: "center", padding: "24px 0" }}>
+            <div className="rouet" />
+            <span className="note">
+              {etape === "lecture" ? "Préparation de la photo"
+                : etape === "analyse" ? "Identification des pièces"
+                : "Rangement dans la cave"}
+            </span>
+          </div>
+        )}
+
+        {etape === "verif" && (
+          <>
+            <h2 style={{ fontWeight: 300, fontSize: 22, margin: "0 0 6px" }}>
+              {trouvees.length} pièce(s) reconnue(s)
+            </h2>
+            <p className="note" style={{ margin: "0 0 4px" }}>
+              Décoche ce qui n'est pas un vêtement, corrige les noms, puis nomme le sac.
+            </p>
+            {sansDecoupe > 0 && (
+              <p className="note" style={{ margin: "0 0 14px", color: "var(--alerte)" }}>
+                {sansDecoupe} vignette(s) n'ont pas pu être découpées : ces pièces gardent
+                la photo entière du sac.
+              </p>
+            )}
+
+            {apercu && <img src={apercu} alt="" style={{ width: "100%", maxHeight: "26vh",
+              objectFit: "contain", margin: "10px 0 16px" }} />}
+
+            {trouvees.map((x, k) => (
+              <div className="carte" key={k} style={{ opacity: x.garder ? 1 : 0.45 }}>
+                <div style={{ display: "flex", gap: 12 }}>
+                  <div style={{ width: 54, height: 72, flexShrink: 0, background: "#E5E1D8", overflow: "hidden" }}>
+                    <img src={x.apercu} alt="" loading="lazy"
+                      style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div className="champ" style={{ marginBottom: 8 }}>
+                      <input value={x.fiche.nom}
+                        onChange={(e) => modifier(k, { fiche: { ...x.fiche, nom: e.target.value } })} />
+                    </div>
+                    <div className="champ" style={{ marginBottom: 0 }}>
+                      <select value={x.fiche.categorie}
+                        onChange={(e) => modifier(k, { fiche: { ...x.fiche, categorie: e.target.value } })}>
+                        {CATS.map((n) => <option key={n}>{n}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+                <div className="pastilles" style={{ marginTop: 10 }}>
+                  <button className="pastille" data-actif={x.garder ? "1" : "0"}
+                    onClick={() => modifier(k, { garder: !x.garder })}>
+                    {x.garder ? "à ranger" : "ignorée"}
+                  </button>
+                  {x.fiche.marque && <span className="note" style={{ alignSelf: "center" }}>{x.fiche.marque}</span>}
+                </div>
+              </div>
+            ))}
+
+            <section className="section">
+              <div className="entete">sac de rangement</div>
+              {sacs.length > 0 && (
+                <div className="champ">
+                  <label>Sacs déjà utilisés</label>
+                  <div className="pastilles">
+                    {sacs.map((s) => (
+                      <button key={s} className="pastille"
+                        data-actif={sac.trim().toLowerCase() === s.toLowerCase() ? "1" : "0"}
+                        onClick={() => setSac(s)}>{s}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="champ">
+                <label>{sacs.length ? "Ou un nouveau sac" : "Nom du sac"}</label>
+                <input value={sac} onChange={(e) => setSac(e.target.value)}
+                  placeholder="Sac bleu du haut, carton hiver…" />
+              </div>
+            </section>
+
+            <div className="duo" style={{ marginTop: 8 }}>
+              <button className="bouton discret" onClick={fermer}>Annuler</button>
+              <button className="bouton plein" disabled={!retenues.length || !sac.trim()}
+                onClick={enregistrer}>
+                Ranger {retenues.length} pièce(s)
+              </button>
+            </div>
+          </>
+        )}
+
+        <input ref={champ} type="file" accept="image/*"
+          style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
+          onChange={(e) => { analyser(e.target.files); e.target.value = ""; }} />
+      </div>
+    </>
+  );
+}
+
+function VueCave(c) {
+  const { cave, sacs, urls, setOuvert, sortirDeCave, setVue } = c;
   const [confirme, setConfirme] = useState(null);
+  const [groupe, setGroupe] = useState(false);
+
+  const boutonGroupe = (
+    <button className="bouton contour" onClick={() => setGroupe(true)}>
+      Remplir un sac depuis une photo
+    </button>
+  );
 
   if (!cave.length) {
     return (
@@ -366,8 +577,11 @@ function VueCave({ cave, sacs, urls, setOuvert, sortirDeCave, setVue }) {
             ou mis de côté : ces pièces sortent de la garde-robe et des suggestions,
             sans être supprimées.
           </p>
-          <button className="bouton plein" onClick={() => setVue("pieces")}>Aller à la garde-robe</button>
+          {boutonGroupe}
+          <button className="bouton discret" style={{ marginTop: 8 }}
+            onClick={() => setVue("pieces")}>Aller à la garde-robe</button>
         </div>
+        {groupe && <AjoutGroupe {...c} fermer={() => setGroupe(false)} />}
       </div>
     );
   }
@@ -378,6 +592,8 @@ function VueCave({ cave, sacs, urls, setOuvert, sortirDeCave, setVue }) {
         {cave.length} pièce(s) rangée(s) dans {sacs.length} sac(s). Elles n'apparaissent ni dans
         la garde-robe, ni dans les suggestions, tant qu'elles sont ici.
       </p>
+      {boutonGroupe}
+      {groupe && <AjoutGroupe {...c} fermer={() => setGroupe(false)} />}
 
       {sacs.map((s) => {
         const dedans = cave.filter((p) => p.cave.sac === s);

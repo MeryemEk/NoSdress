@@ -17,7 +17,9 @@ export default async function handler(req, res) {
   if (!corps || !MODELES.includes(corps.model)) {
     return res.status(400).json({ error: "Modèle non autorisé" });
   }
-  if (Number(corps.max_tokens) > 2000) corps.max_tokens = 2000;
+  // 4000 pour laisser passer l'identification d'une photo de groupe, qui décrit
+  // une dizaine de pièces d'un coup. Les autres appels demandent bien moins.
+  if (Number(corps.max_tokens) > 4000) corps.max_tokens = 4000;
 
   try {
     const r = await fetch("https://api.anthropic.com/v1/messages", {

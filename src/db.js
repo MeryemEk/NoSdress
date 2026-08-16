@@ -84,6 +84,52 @@ export function compresser(fichier, max = 1100, qualite = 0.72) {
   });
 }
 
+/* Vérifie qu'un cadre renvoyé par le modèle est exploitable. Les coordonnées
+   sont en pourcentages de l'image, x et y au coin haut gauche. */
+function cadreValide(cadre) {
+  if (!cadre || typeof cadre !== "object") return null;
+  const n = (v) => (typeof v === "number" && isFinite(v) ? v : Number(v));
+  const x = n(cadre.x), y = n(cadre.y), l = n(cadre.l), h = n(cadre.h);
+  if ([x, y, l, h].some((v) => !isFinite(v))) return null;
+  if (l < 4 || h < 4) return null;              // trop petit pour être un vêtement
+  if (x < -5 || y < -5 || x > 100 || y > 100) return null;
+  if (l > 100 || h > 100) return null;
+  if (l * h > 9200) return null;                // couvre presque toute la photo
+  return { x: Math.max(0, x), y: Math.max(0, y), l, h };
+}
+
+/* Découpe une pièce dans la photo de groupe. Rend null si le cadre est
+   inexploitable : l'appelant retombe alors sur la photo entière. */
+export function decouper(blob, cadre, marge = 2) {
+  const c = cadreValide(cadre);
+  if (!c) return Promise.resolve(null);
+  return new Promise((res) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const px = (v, total) => Math.round((v / 100) * total);
+        const x = Math.max(0, px(c.x - marge, img.width));
+        const y = Math.max(0, px(c.y - marge, img.height));
+        const l = Math.min(img.width - x, px(c.l + marge * 2, img.width));
+        const h = Math.min(img.height - y, px(c.h + marge * 2, img.height));
+        URL.revokeObjectURL(url);
+        if (l < 24 || h < 24) { res(null); return; }
+        const toile = document.createElement("canvas");
+        toile.width = l;
+        toile.height = h;
+        toile.getContext("2d").drawImage(img, x, y, l, h, 0, 0, l, h);
+        toile.toBlob((b) => res(b || null), "image/jpeg", 0.75);
+      } catch (e) {
+        URL.revokeObjectURL(url);
+        res(null);
+      }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); res(null); };
+    img.src = url;
+  });
+}
+
 export const enBase64 = (blob) => new Promise((res, rej) => {
   const l = new FileReader();
   l.onload = () => res(String(l.result).split(",")[1]);

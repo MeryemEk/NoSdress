@@ -178,6 +178,46 @@ contredisent ce que tu vois :\n${contexte}`
   return normaliser(brut);
 }
 
+const CONSIGNE_GROUPE = `Cette photo montre plusieurs vêtements posés à plat, côte à côte.
+
+Identifie CHAQUE article distinct visible. Un vêtement plié compte pour un seul article.
+Un ensemble posé l'un sur l'autre, par exemple un sweat et un pantalon superposés, compte
+pour deux articles. Ignore le sol, les papiers, les post-it, les étiquettes volantes et
+tout ce qui n'est pas un vêtement, une chaussure, un sac ou un accessoire.
+
+Pour chaque article, donne aussi son cadre dans l'image, exprimé en pourcentages :
+x et y sont le coin haut gauche, l la largeur, h la hauteur. Le cadre doit entourer
+l'article entier sans déborder sur ses voisins.
+
+Réponds uniquement avec un objet JSON valide, sans texte autour ni balise markdown :
+{"pieces":[{"nom":"nom court et descriptif en français, 2 à 4 mots",
+"categorie":"Haut|Bas|Robe|Veste|Chaussures|Sac|Accessoire|Bijou",
+"sousCategorie":"ex: chemise, jean droit, escarpin",
+"couleurs":["1 à 3 couleurs en français"],
+"marque":"marque uniquement si un logo ou une étiquette est lisible, sinon null",
+"matiere":"matière apparente ou null",
+"taille":"taille si lisible sur une étiquette, sinon null",
+"motif":"uni, rayé, imprimé, à carreaux, etc.",
+"saisons":["Printemps","Été","Automne","Hiver"],
+"styles":["2 à 3 mots-clés"],
+"formalite":3,
+"confiance":"haute|moyenne|basse",
+"cadre":{"x":0,"y":0,"l":0,"h":0}}]}
+formalite va de 1 à 5. confiance porte sur la marque.
+N'invente jamais une marque absente de la photo.`;
+
+/* Identifie d'un coup tous les vêtements d'une photo de groupe. Un seul appel
+   pour tout un sac, donc nettement moins cher que pièce par pièce. */
+export async function identifierGroupe(base64) {
+  const brut = await appeler([
+    { type: "image", source: { type: "base64", media_type: "image/jpeg", data: base64 } },
+    { type: "text", text: CONSIGNE_GROUPE },
+  ], { tokens: 3000 });
+
+  const liste = Array.isArray(brut.pieces) ? brut.pieces : [];
+  return liste.map((p) => ({ ...normaliser(p), cadre: p && p.cadre }));
+}
+
 /* Demande au serveur de lire une page produit et d'en rapporter l'image. */
 export async function lirePage(url) {
   const stop = new AbortController();
