@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { tout, lire, poser, oter, toutesLesPhotos, compresser, decouper, enBase64, base64EnBlob,
   exporterDonnees, importerDonnees, resumerSauvegarde, estimerPlace,
-  migrerJournal, creneauxAPlat, LIBELLES, LIBELLE_DEFAUT } from "./db.js";
+  migrerJournal, creneauxAPlat, LIBELLES, LIBELLE_DEFAUT,
+  harmoniser, ressemblances } from "./db.js";
 import { identifier, identifierGroupe, lirePage, suggerer, normaliser, codeLocal,
   CATS, SAISONS, FORM, TYPES, MATIERES, COULEURS } from "./ai.js";
 
@@ -66,7 +67,8 @@ export default function App() {
   };
 
   const ajouterPiece = async (fiche, blob) => {
-    const piece = { ...fiche, id: uid(), ajoute: iso(new Date()) };
+    const connues = [...new Set(boite.current.pieces.map((x) => x.marque).filter(Boolean))];
+    const piece = { ...fiche, marque: harmoniser(connues, fiche.marque), id: uid(), ajoute: iso(new Date()) };
     await poser("pieces", piece);
     // La photo n'est enregistrée que si la compression a réellement produit une
     // image. Sans elle, la fiche existe quand même et l'aperçu reste vide.
@@ -79,7 +81,10 @@ export default function App() {
     return piece;
   };
 
-  const majPiece = async (piece) => {
+  const majPiece = async (brute) => {
+    const connues = [...new Set(boite.current.pieces
+      .filter((x) => x.id !== brute.id).map((x) => x.marque).filter(Boolean))];
+    const piece = { ...brute, marque: harmoniser(connues, brute.marque) };
     await poser("pieces", piece);
     boite.current.pieces = boite.current.pieces.map((p) => (p.id === piece.id ? piece : p));
     rafraichir();
@@ -200,7 +205,10 @@ export default function App() {
     const depuis = iso(new Date());
     const creees = [];
     for (const { fiche, blob } of liste) {
-      const piece = { ...fiche, id: uid(), ajoute: depuis, cave: { sac: nom, depuis } };
+      const connues = [...new Set(boite.current.pieces.map((x) => x.marque).filter(Boolean)),
+        ...creees.map((x) => x.marque).filter(Boolean)];
+      const piece = { ...fiche, marque: harmoniser(connues, fiche.marque),
+        id: uid(), ajoute: depuis, cave: { sac: nom, depuis } };
       delete piece.cadre; // le cadre a servi au découpage, il n'a plus d'usage
       await poser("pieces", piece);
       if (blob instanceof Blob) {
@@ -244,6 +252,10 @@ export default function App() {
     return { parTenue, parPiece };
   }, [journal, tenues]);
 
+  // Marques déjà saisies, proposées à la frappe et servant à unifier la casse.
+  const marques = [...new Set(pieces.map((p) => p.marque).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, "fr"));
+
   const actives = pieces.filter((p) => !p.cave);
   const enCave = pieces.filter((p) => p.cave);
   // Noms de sacs déjà utilisés, pour les reproposer au lieu de les retaper.
@@ -252,7 +264,7 @@ export default function App() {
   const c = {
     // pieces ne contient que la garde-robe courante : tout ce qui composait déjà
     // l'application ignore donc la cave sans autre changement.
-    pieces: actives, toutes: pieces, cave: enCave, sacs,
+    pieces: actives, toutes: pieces, cave: enCave, sacs, marques,
     tenues, journal, urls, stats, setVue, setOuvert, setErreur,
     piece: (id) => pieces.find((p) => p.id === id), // cherche aussi dans la cave
     ajouterPiece, majPiece, supprimerPiece, ajouterTenue, supprimerTenue,
@@ -334,11 +346,6 @@ function FormulaireSac({ sacs, depart, combien, valider, annuler }) {
 
   // Si le nom saisi correspond à un sac existant à la casse près, on garde
   // l'orthographe déjà en place plutôt que d'en créer un second.
-  const normaliser2 = (v) => {
-    const propre = v.trim();
-    const connu = sacs.find((s) => s.toLowerCase() === propre.toLowerCase());
-    return connu || propre;
-  };
 
   return (
     <div className="carte">
@@ -369,7 +376,7 @@ function FormulaireSac({ sacs, depart, combien, valider, annuler }) {
       <div className="duo">
         <button className="bouton discret" onClick={annuler}>Annuler</button>
         <button className="bouton plein" disabled={!sac.trim()}
-          onClick={() => valider(normaliser2(sac))}>Ranger à la cave</button>
+          onClick={() => valider(harmoniser(sacs, sac))}>Ranger à la cave</button>
       </div>
     </div>
   );
@@ -377,7 +384,7 @@ function FormulaireSac({ sacs, depart, combien, valider, annuler }) {
 
 /* Une photo, plusieurs vêtements, un seul appel : l'app détecte les pièces,
    découpe une vignette pour chacune, puis les crée directement dans un sac. */
-function AjoutGroupe({ sacs, ajouterPiecesEnCave, fermer, setErreur }) {
+function AjoutGroupe({ sacs, ajouterPiecesEnCave, fermer, setErreur, marques, toutes }) {
   const [etape, setEtape] = useState("choix");
   const [apercu, setApercu] = useState("");
   const [trouvees, setTrouvees] = useState([]);  // { fiche, blob, apercu, decoupee, garder }
@@ -500,23 +507,40 @@ function AjoutGroupe({ sacs, ajouterPiecesEnCave, fermer, setErreur }) {
                       <input value={x.fiche.nom}
                         onChange={(e) => modifier(k, { fiche: { ...x.fiche, nom: e.target.value } })} />
                     </div>
-                    <div className="champ" style={{ marginBottom: 0 }}>
-                      <select value={x.fiche.categorie}
-                        onChange={(e) => modifier(k, { fiche: { ...x.fiche, categorie: e.target.value } })}>
-                        {CATS.map((n) => <option key={n}>{n}</option>)}
-                      </select>
+                    <div className="duo" style={{ gap: 8 }}>
+                      <div className="champ" style={{ marginBottom: 0 }}>
+                        <select value={x.fiche.categorie}
+                          onChange={(e) => modifier(k, { fiche: { ...x.fiche, categorie: e.target.value } })}>
+                          {CATS.map((n) => <option key={n}>{n}</option>)}
+                        </select>
+                      </div>
+                      <div className="champ" style={{ marginBottom: 0 }}>
+                        <input value={x.fiche.marque} placeholder="marque" list="aide-marques"
+                          onChange={(e) => modifier(k, {
+                            fiche: { ...x.fiche, marque: e.target.value, confiance: "haute" },
+                          })} />
+                      </div>
                     </div>
                   </div>
                 </div>
+                {(() => {
+                  const proches = ressemblances(x.fiche, toutes);
+                  return proches.length > 0 && (
+                    <p className="note" style={{ margin: "8px 0 0", color: "var(--alerte)" }}>
+                      Ressemble à « {proches[0].piece.nom} », déjà dans ton catalogue.
+                    </p>
+                  );
+                })()}
                 <div className="pastilles" style={{ marginTop: 10 }}>
                   <button className="pastille" data-actif={x.garder ? "1" : "0"}
                     onClick={() => modifier(k, { garder: !x.garder })}>
                     {x.garder ? "à ranger" : "ignorée"}
                   </button>
-                  {x.fiche.marque && <span className="note" style={{ alignSelf: "center" }}>{x.fiche.marque}</span>}
                 </div>
               </div>
             ))}
+
+            <datalist id="aide-marques">{marques.map((m) => <option key={m} value={m} />)}</datalist>
 
             <section className="section">
               <div className="entete">sac de rangement</div>
@@ -727,7 +751,7 @@ function VuePieces(c) {
   );
 }
 
-function Ajout({ ajouterPiece, fermer, setErreur }) {
+function Ajout({ ajouterPiece, fermer, setErreur, marques, toutes, urls }) {
   const [etape, setEtape] = useState("choix");
   const [blob, setBlob] = useState(null);
   const [apercu, setApercu] = useState("");
@@ -736,7 +760,11 @@ function Ajout({ ajouterPiece, fermer, setErreur }) {
   const [web, setWeb] = useState(false);
   const [souci, setSouci] = useState("");
   const [lien, setLien] = useState("");
+  const [doubleIgnore, setDoubleIgnore] = useState(false);
   const champ = useRef(null);
+
+  // Comparaison avec le catalogue existant, sans appel au modèle.
+  const sosies = fiche ? ressemblances(fiche, toutes) : [];
 
   /* Import depuis une page produit : le serveur lit la page et rapporte l'image,
      qui repasse ensuite par la compression et l'identification habituelles. */
@@ -850,7 +878,23 @@ function Ajout({ ajouterPiece, fermer, setErreur }) {
         {etape === "fiche" && (
           <>
             {souci && <p className="note" style={{ color: "var(--alerte)", marginTop: 0 }}>{souci}</p>}
+            {sosies.length > 0 && !doubleIgnore && (
+              <div className="avertissement" style={{ marginBottom: 14 }}>
+                <p>
+                  {sosies.length === 1 ? "Une pièce très proche existe déjà" : "Des pièces très proches existent déjà"} :
+                  {" "}{sosies.map((x) => x.piece.nom).join(", ")}. Si c'est la même, annule plutôt que d'ajouter un doublon.
+                </p>
+                <div className="bande" style={{ marginTop: 10 }}>
+                  {sosies.map((x) => (urls[x.piece.id]
+                    ? <img key={x.piece.id} src={urls[x.piece.id]} alt={x.piece.nom} loading="lazy" />
+                    : <div key={x.piece.id} className="vide" />))}
+                </div>
+                <button className="bouton discret" style={{ marginTop: 10 }}
+                  onClick={() => setDoubleIgnore(true)}>C'est une autre pièce</button>
+              </div>
+            )}
             <Formulaire
+              marques={marques}
               depart={fiche} apercu={apercu}
               valider={async (f) => {
                 try { await ajouterPiece(f, blob); fermer(); }
@@ -869,7 +913,7 @@ function Ajout({ ajouterPiece, fermer, setErreur }) {
   );
 }
 
-function Formulaire({ depart, apercu, valider, annuler }) {
+function Formulaire({ depart, apercu, valider, annuler, marques = [] }) {
   const [f, setF] = useState({ taille: "", ...depart });
   const sur = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const bascule = (k, v) => setF({ ...f, [k]: f[k].includes(v) ? f[k].filter((x) => x !== v) : [...f[k], v] });
@@ -896,9 +940,10 @@ function Formulaire({ depart, apercu, valider, annuler }) {
           <select value={f.categorie} onChange={sur("categorie")}>{CATS.map((k) => <option key={k}>{k}</option>)}</select>
         </div>
         <div className="champ"><label>Marque</label>
-          <input value={f.marque} placeholder="inconnue"
+          <input value={f.marque} placeholder="inconnue" list="aide-marques"
             onChange={(e) => setF({ ...f, marque: e.target.value, confiance: "haute" })} />
         </div>
+        <datalist id="aide-marques">{marques.map((m) => <option key={m} value={m} />)}</datalist>
       </div>
       <div className="duo">
         <div className="champ"><label>Type</label>
@@ -950,7 +995,7 @@ function Formulaire({ depart, apercu, valider, annuler }) {
 }
 
 function FichePiece({ id, toutes, urls, stats, majPiece, supprimerPiece, setOuvert, setErreur,
-  sacs, rangerEnCave, sortirDeCave }) {
+  sacs, rangerEnCave, sortirDeCave, marques }) {
   const p = toutes.find((x) => x.id === id);
   const [edition, setEdition] = useState(false);
   const [confirme, setConfirme] = useState(false);
@@ -964,7 +1009,7 @@ function FichePiece({ id, toutes, urls, stats, majPiece, supprimerPiece, setOuve
       <div className="panneau">
         <BoutonFermer onClick={() => setOuvert(null)} />
         {edition ? (
-          <Formulaire depart={p} apercu={urls[id]}
+          <Formulaire depart={p} apercu={urls[id]} marques={marques}
             valider={async (f) => {
               try { await majPiece({ ...p, ...f }); setEdition(false); }
               catch (e) { setErreur("Enregistrement impossible : " + (e && e.message ? e.message : e)); }
@@ -1660,7 +1705,7 @@ function poids(octets) {
   return `${(octets / 1048576).toFixed(1)} Mo`;
 }
 
-function VueDonnees({ pieces, tenues, journal, setErreur }) {
+function VueDonnees({ toutes, cave, tenues, journal, setErreur }) {
   const [occupe, setOccupe] = useState(false);
   const [etat, setEtat] = useState("");
   const [enAttente, setEnAttente] = useState(null); // { data, resume } avant confirmation
@@ -1680,7 +1725,7 @@ function VueDonnees({ pieces, tenues, journal, setErreur }) {
 
   useEffect(() => {
     estimerPlace().then(setPlace).catch(() => setPlace(null));
-  }, [pieces.length, tenues.length]);
+  }, [toutes.length, tenues.length]);
 
   const exporter = async () => {
     setOccupe(true); setEtat("");
@@ -1748,13 +1793,13 @@ function VueDonnees({ pieces, tenues, journal, setErreur }) {
           que tu gardes ailleurs : il contient tes fiches, tes tenues, ton journal et tes photos.
         </p>
         <p className="note">
-          {pieces.length} pièces · {tenues.length} tenues · {creneaux} créneau(x) sur {jours} jour(s)
+          {toutes.length} pièces dont {cave.length} à la cave · {tenues.length} tenues · {creneaux} créneau(x) sur {jours} jour(s)
           {place && place.total ? ` · ${poids(place.utilise)} utilisés` : ""}
         </p>
-        <button className="bouton plein" disabled={occupe || !pieces.length} onClick={exporter}>
+        <button className="bouton plein" disabled={occupe || !toutes.length} onClick={exporter}>
           {occupe ? "Un instant…" : "Exporter le catalogue"}
         </button>
-        {!pieces.length && (
+        {!toutes.length && (
           <p className="note" style={{ marginTop: 8 }}>Rien à exporter pour l'instant.</p>
         )}
         {etat && <p className="note" style={{ marginTop: 10, color: "var(--olive)" }}>{etat}</p>}
@@ -1787,7 +1832,7 @@ function VueDonnees({ pieces, tenues, journal, setErreur }) {
               {enAttente.resume.exporte ? ` Exportée le ${enAttente.resume.exporte.slice(0, 10)}.` : ""}
             </p>
             <p className="note" style={{ margin: "0 0 16px", color: "var(--alerte)" }}>
-              Le contenu présent dans ce navigateur ({pieces.length} pièces, {tenues.length} tenues)
+              Le contenu présent dans ce navigateur ({toutes.length} pièces, {tenues.length} tenues)
               sera effacé et remplacé. Pense à l'exporter d'abord si tu veux le garder.
             </p>
             <div className="duo">

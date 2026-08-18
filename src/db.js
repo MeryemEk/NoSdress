@@ -143,6 +143,70 @@ export async function estimerPlace() {
   return { utilise: usage || 0, total: quota || 0 };
 }
 
+/* ------------------------------------------------------------------ doublons
+
+   Rapprochement de deux fiches à partir des seules données déjà saisies :
+   aucun appel au modèle, aucun traitement d'image, donc coût nul. */
+
+const sansAccents = (s) => String(s || "")
+  .normalize("NFD").replace(/[̀-ͯ]/g, "")
+  .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+/* Rend l'orthographe déjà employée si le mot existe déjà à la casse ou aux
+   accents près. Évite « COS » et « cos » comme deux marques distinctes. */
+export function harmoniser(connus, valeur) {
+  const propre = String(valeur || "").trim();
+  if (!propre) return "";
+  const cle = sansAccents(propre);
+  return (connus || []).find((s) => sansAccents(s) === cle) || propre;
+}
+
+const mots = (s) => sansAccents(s).split(" ").filter((m) => m.length > 2);
+
+function recouvrement(a, b) {
+  const A = new Set(mots(a)), B = new Set(mots(b));
+  if (!A.size || !B.size) return 0;
+  let communs = 0;
+  A.forEach((m) => { if (B.has(m)) communs += 1; });
+  return communs / Math.min(A.size, B.size);
+}
+
+function partCommune(a, b) {
+  const A = new Set((a || []).map(sansAccents).filter(Boolean));
+  const B = new Set((b || []).map(sansAccents).filter(Boolean));
+  if (!A.size || !B.size) return 0;
+  let communes = 0;
+  A.forEach((x) => { if (B.has(x)) communes += 1; });
+  return communes / Math.min(A.size, B.size);
+}
+
+/* Pièces du catalogue qui ressemblent à la fiche proposée. La catégorie doit
+   correspondre, ensuite le score cumule couleurs, type, marque, matière et
+   taille. La couleur pèse le plus : deux vêtements de couleurs différentes ne
+   sont pas le même vêtement, même de la même marque et du même type. Sans
+   couleur commune le total plafonne à 60, donc sous le seuil. Le seuil est
+   volontairement haut : mieux vaut manquer un doublon que gêner chaque ajout. */
+export function ressemblances(fiche, pieces, seuil = 70) {
+  if (!fiche) return [];
+  const sortie = [];
+  for (const p of pieces || []) {
+    if (!p || p.categorie !== fiche.categorie) continue;
+    let score = 0;
+    score += Math.round(40 * partCommune(fiche.couleurs, p.couleurs));
+    score += Math.round(25 * Math.max(
+      recouvrement(fiche.sousCategorie, p.sousCategorie),
+      recouvrement(fiche.nom, p.nom)));
+    const mA = sansAccents(fiche.marque), mB = sansAccents(p.marque);
+    if (mA && mA === mB) score += 20;
+    const matA = sansAccents(fiche.matiere);
+    if (matA && matA === sansAccents(p.matiere)) score += 8;
+    const tA = String(fiche.taille || "").trim();
+    if (tA && tA === String(p.taille || "").trim()) score += 7;
+    if (score >= seuil) sortie.push({ piece: p, score });
+  }
+  return sortie.sort((a, b) => b.score - a.score).slice(0, 3);
+}
+
 /* ------------------------------------------------------------------ journal
 
    Le journal associe une date à une liste de créneaux. Un créneau porte la
