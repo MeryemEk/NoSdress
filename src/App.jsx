@@ -585,6 +585,10 @@ function VueCave(c) {
   const { cave, sacs, urls, setOuvert, sortirDeCave, setVue } = c;
   const [confirme, setConfirme] = useState(null);
   const [groupe, setGroupe] = useState(false);
+  // Sacs déroulés. Tout est replié par défaut : la cave sert à retrouver un sac,
+  // pas à faire défiler toutes les photos qu'elle contient.
+  const [deroules, setDeroules] = useState([]);
+  const basculerSac = (s) => setDeroules((l) => (l.includes(s) ? l.filter((x) => x !== s) : [...l, s]));
 
   const boutonGroupe = (
     <button className="bouton contour" onClick={() => setGroupe(true)}>
@@ -619,38 +623,60 @@ function VueCave(c) {
       {boutonGroupe}
       {groupe && <AjoutGroupe {...c} fermer={() => setGroupe(false)} />}
 
-      {sacs.map((s) => {
-        const dedans = cave.filter((p) => p.cave.sac === s);
-        return (
-          <section className="section" key={s}>
-            <div className="entete">{s} · {dedans.length}</div>
-            <div className="grille">
-              {dedans.map((p) => (
-                <button className="piece" key={p.id} onClick={() => setOuvert(p.id)}>
-                  <div className="photo">
-                    {urls[p.id] && <img src={urls[p.id]} alt={p.nom} loading="lazy" />}
+      <div style={{ marginTop: 24 }}>
+        {sacs.map((s) => {
+          const dedans = cave.filter((p) => p.cave.sac === s);
+          const ouvertSac = deroules.includes(s);
+          return (
+            <div key={s}>
+              <button onClick={() => basculerSac(s)}
+                aria-expanded={ouvertSac ? "true" : "false"}
+                style={{
+                  display: "flex", width: "100%", alignItems: "center",
+                  justifyContent: "space-between", gap: 10, textAlign: "left",
+                  padding: "14px 0", borderBottom: "1px solid var(--ligne)",
+                }}>
+                <span style={{ fontSize: 16, fontWeight: 300 }}>{s}</span>
+                <span style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <span className="note">{dedans.length} pièce(s)</span>
+                  <span style={{ fontSize: 15, color: "var(--gris)", width: 12, textAlign: "center" }}>
+                    {ouvertSac ? "\u2212" : "+"}
+                  </span>
+                </span>
+              </button>
+
+              {ouvertSac && (
+                <div style={{ padding: "14px 0 20px" }}>
+                  <div className="grille">
+                    {dedans.map((p) => (
+                      <button className="piece" key={p.id} onClick={() => setOuvert(p.id)}>
+                        <div className="photo">
+                          {urls[p.id] && <img src={urls[p.id]} alt={p.nom} loading="lazy" />}
+                        </div>
+                        <div className="legende"><b>{p.nom}</b>{p.marque || p.sousCategorie}</div>
+                      </button>
+                    ))}
                   </div>
-                  <div className="legende"><b>{p.nom}</b>{p.marque || p.sousCategorie}</div>
-                </button>
-              ))}
-            </div>
-            {confirme === s
-              ? (
-                <div className="duo" style={{ marginTop: 12 }}>
-                  <button className="bouton discret" onClick={() => setConfirme(null)}>Annuler</button>
-                  <button className="bouton plein" onClick={async () => {
-                    await sortirDeCave(dedans.map((p) => p.id));
-                    setConfirme(null);
-                  }}>Confirmer, tout ressortir</button>
+                  {confirme === s
+                    ? (
+                      <div className="duo" style={{ marginTop: 12 }}>
+                        <button className="bouton discret" onClick={() => setConfirme(null)}>Annuler</button>
+                        <button className="bouton plein" onClick={async () => {
+                          await sortirDeCave(dedans.map((p) => p.id));
+                          setConfirme(null);
+                        }}>Confirmer, tout ressortir</button>
+                      </div>
+                    )
+                    : (
+                      <button className="bouton discret" style={{ marginTop: 12 }}
+                        onClick={() => setConfirme(s)}>Ressortir tout ce sac</button>
+                    )}
                 </div>
-              )
-              : (
-                <button className="bouton discret" style={{ marginTop: 12 }}
-                  onClick={() => setConfirme(s)}>Ressortir tout ce sac</button>
               )}
-          </section>
-        );
-      })}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
