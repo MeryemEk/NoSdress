@@ -1927,6 +1927,12 @@ function VueDonnees({ toutes, cave, tenues, journal, setErreur }) {
   return (
     <div className="corps">
       <section className="section" style={{ marginTop: 8 }}>
+        <div className="entete">diagnostic</div>
+        <button className="bouton discret" onClick={() => window.__afficherDiag && window.__afficherDiag()}>
+          Afficher le journal de démarrage
+        </button>
+      </section>
+      <section className="section">
         <div className="entete">code d'accès</div>
         <p className="note" style={{ marginTop: 0 }}>
           Le code que tu as défini sur Vercel (variable DRESSING_CODE). Il est demandé
