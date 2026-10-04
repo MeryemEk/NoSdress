@@ -65,6 +65,35 @@ export async function toutesLesPhotos() {
   return carte;
 }
 
+/* Miniatures : une copie légère de chaque photo, rangée dans le même magasin
+   sous une clé préfixée. Ce sont elles qu'affichent les grilles, le calendrier
+   et les tenues. Afficher partout les photos en 1100 px faisait dépasser à
+   Safari sa limite de mémoire dès quelques centaines de pièces : iOS coupait
+   alors l'application et la rechargeait, d'où un écran qui clignote. */
+export const cleMini = (cle) => `mini:${cle}`;
+export const estMini = (cle) => String(cle).startsWith("mini:");
+export const miniature = (blob) => compresser(blob, 420, 0.7);
+
+/* Au démarrage : les miniatures déjà prêtes, et la liste des photos qui n'en
+   ont pas encore. Les photos en grand ne sont pas lues ici, seulement leurs clés. */
+export async function inventairePhotos() {
+  const db = await ouvrir();
+  const t = db.transaction("photos");
+  const s = t.objectStore("photos");
+  const plage = IDBKeyRange.bound("mini:", "mini:\uffff");
+  const [cles, clesMini, minis] = await Promise.all([
+    attendre(s.getAllKeys()), attendre(s.getAllKeys(plage)), attendre(s.getAll(plage)),
+  ]);
+  const legeres = {};
+  clesMini.forEach((c, i) => { legeres[String(c).slice(5)] = minis[i]; });
+  // Les mosaïques de tenues sont déjà petites (300 × 400), on les prend telles quelles.
+  const mosaiques = cles.filter((c) => String(c).startsWith("tenue:"));
+  const tenues = await Promise.all(mosaiques.map((c) => attendre(s.get(c))));
+  mosaiques.forEach((c, i) => { legeres[c] = tenues[i]; });
+  const sansMini = cles.filter((c) => !estMini(c) && !String(c).startsWith("tenue:") && !legeres[c]);
+  return { legeres, sansMini };
+}
+
 /* Réduit une photo d'appareil photo à une taille raisonnable, et la garde en Blob. */
 export function compresser(fichier, max = 1100, qualite = 0.72) {
   return new Promise((res, rej) => {
@@ -77,7 +106,11 @@ export function compresser(fichier, max = 1100, qualite = 0.72) {
       c.height = Math.round(img.height * e);
       c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
       URL.revokeObjectURL(url);
-      c.toBlob((b) => (b ? res(b) : rej(new Error("compression"))), "image/jpeg", qualite);
+      c.toBlob((b) => {
+        // Safari ne rend la mémoire d'une toile qu'une fois réduite à zéro.
+        c.width = 0; c.height = 0;
+        b ? res(b) : rej(new Error("compression"));
+      }, "image/jpeg", qualite);
     };
     img.onerror = () => { URL.revokeObjectURL(url); rej(new Error("lecture image")); };
     img.src = url;
@@ -119,7 +152,7 @@ export function decouper(blob, cadre, marge = 2) {
         toile.width = l;
         toile.height = h;
         toile.getContext("2d").drawImage(img, x, y, l, h, 0, 0, l, h);
-        toile.toBlob((b) => res(b || null), "image/jpeg", 0.75);
+        toile.toBlob((b) => { toile.width = 0; toile.height = 0; res(b || null); }, "image/jpeg", 0.75);
       } catch (e) {
         URL.revokeObjectURL(url);
         res(null);
@@ -127,6 +160,60 @@ export function decouper(blob, cadre, marge = 2) {
     };
     img.onerror = () => { URL.revokeObjectURL(url); res(null); };
     img.src = url;
+  });
+}
+
+/* Mosaïque des pièces d'une tenue, pour la représenter d'un seul coup d'œil là
+   où il n'y a pas la place d'afficher chaque photo : cases du calendrier et
+   créneaux de la vue semaine. Rend null si aucune image n'est exploitable,
+   l'appelant retombe alors sur l'ancien comportement. */
+export function collage(blobs, largeur = 300, hauteur = 400) {
+  const liste = (blobs || []).filter((b) => b instanceof Blob).slice(0, 6);
+  if (!liste.length) return Promise.resolve(null);
+
+  return new Promise((res) => {
+    const adresses = liste.map((b) => URL.createObjectURL(b));
+    const images = new Array(adresses.length).fill(null);
+    let restants = adresses.length;
+
+    const dessiner = () => {
+      adresses.forEach((a) => URL.revokeObjectURL(a));
+      const utiles = images.filter(Boolean);
+      if (!utiles.length) { res(null); return; }
+      try {
+        const colonnes = utiles.length === 1 ? 1 : utiles.length <= 4 ? 2 : 3;
+        const lignes = Math.ceil(utiles.length / colonnes);
+        const toile = document.createElement("canvas");
+        toile.width = largeur;
+        toile.height = hauteur;
+        const ctx = toile.getContext("2d");
+        ctx.fillStyle = "#E5E1D8";
+        ctx.fillRect(0, 0, largeur, hauteur);
+        const cw = largeur / colonnes, ch = hauteur / lignes;
+        utiles.forEach((img, i) => {
+          const cx = (i % colonnes) * cw, cy = Math.floor(i / colonnes) * ch;
+          // Recadrage « couvrant » : la case est remplie, le débord est rogné.
+          const e = Math.max(cw / img.width, ch / img.height);
+          const dw = img.width * e, dh = img.height * e;
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(cx, cy, cw, ch);
+          ctx.clip();
+          ctx.drawImage(img, cx + (cw - dw) / 2, cy + (ch - dh) / 2, dw, dh);
+          ctx.restore();
+        });
+        toile.toBlob((b) => { toile.width = 0; toile.height = 0; res(b || null); }, "image/jpeg", 0.72);
+      } catch (e) {
+        res(null);
+      }
+    };
+
+    adresses.forEach((a, i) => {
+      const img = new Image();
+      img.onload = () => { images[i] = img; if (--restants === 0) dessiner(); };
+      img.onerror = () => { if (--restants === 0) dessiner(); };
+      img.src = a;
+    });
   });
 }
 
@@ -316,6 +403,10 @@ export async function exporterDonnees() {
   ]);
   const photosEncodees = {};
   for (const [id, blob] of Object.entries(photos || {})) {
+    // Les mosaïques de tenues se recalculent à partir des pièces : inutile de
+    // les transporter, elles ne feraient qu'alourdir la sauvegarde.
+    // Même chose pour les miniatures.
+    if (String(id).startsWith("tenue:") || estMini(id)) continue;
     photosEncodees[id] = await blobEnDataURL(blob);
   }
   return {

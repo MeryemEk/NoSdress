@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
-import { tout, lire, poser, oter, toutesLesPhotos, compresser, decouper, enBase64, base64EnBlob,
+import { tout, lire, poser, oter, inventairePhotos, cleMini, miniature, compresser, decouper, collage, enBase64, base64EnBlob,
   exporterDonnees, importerDonnees, resumerSauvegarde, estimerPlace,
   migrerJournal, creneauxAPlat, LIBELLES, LIBELLE_DEFAUT,
   harmoniser, ressemblances } from "./db.js";
@@ -14,6 +14,25 @@ const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(
 /* Les photos du jour vivent dans le même magasin que celles des pièces, sous une
    clé préfixée : elles suivent donc l'export et l'import sans traitement à part. */
 const clePhotoJour = (date) => `jour:${date}`;
+/* Mosaïque d'une tenue, rangée dans le même magasin sous une clé préfixée. */
+const cleCollage = (id) => `tenue:${id}`;
+/* Photo en grand, lue à la demande et libérée à la fermeture. Seuls la fiche
+   d'une pièce et la photo du jour l'affichent ; partout ailleurs, la miniature
+   suffit. Tant qu'elle se charge, on montre la miniature. */
+function usePhotoGrande(cle, repli) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    let vivant = true, adresse = null;
+    lire("photos", cle).then((b) => {
+      if (!vivant || !(b instanceof Blob)) return;
+      adresse = URL.createObjectURL(b);
+      setUrl(adresse);
+    }).catch(() => {});
+    return () => { vivant = false; if (adresse) URL.revokeObjectURL(adresse); setUrl(null); };
+  }, [cle, repli]);
+  return url || repli;
+}
+
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const joli = (s) => {
   const [a, m, j] = s.split("-");
@@ -34,10 +53,13 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
+      let aMiniaturiser = [], legeres = {};
       try {
-        const [p, t, j, photos] = await Promise.all([
-          tout("pieces"), tout("tenues"), lire("divers", "journal"), toutesLesPhotos(),
+        const [p, t, j, inventaire] = await Promise.all([
+          tout("pieces"), tout("tenues"), lire("divers", "journal"), inventairePhotos(),
         ]);
+        aMiniaturiser = inventaire.sansMini;
+        legeres = inventaire.legeres;
         // Le journal peut être à l'ancien format, une seule tenue par date.
         // On le convertit et on ne réécrit la base que si quelque chose a bougé.
         const migre = migrerJournal(j);
@@ -46,7 +68,7 @@ export default function App() {
         const carte = {};
         // On ignore une éventuelle entrée sans image valide : une seule photo
         // corrompue ne doit pas empêcher toute la garde-robe de s'ouvrir.
-        Object.entries(photos).forEach(([id, blob]) => {
+        Object.entries(inventaire.legeres).forEach(([id, blob]) => {
           if (blob instanceof Blob) carte[id] = URL.createObjectURL(blob);
         });
         setPieces(boite.current.pieces);
@@ -57,8 +79,78 @@ export default function App() {
         setErreur("Base locale inaccessible. Vérifie que la navigation privée est désactivée.");
       }
       setPret(true);
+
+      // Les photos enregistrées avant l'arrivée des miniatures en reçoivent une
+      // ici, une à la fois pour ne jamais garder plusieurs grandes images en
+      // mémoire. Elles apparaissent au fur et à mesure, une seule fois.
+      for (const cle of aMiniaturiser) {
+        try {
+          const grande = await lire("photos", cle);
+          if (!(grande instanceof Blob)) continue;
+          const mini = await miniature(grande);
+          await poser("photos", mini, cleMini(cle));
+          setUrls((u) => ({ ...u, [cle]: URL.createObjectURL(mini) }));
+        } catch (e) { /* cette photo reste sans aperçu, les autres continuent */ }
+      }
+
+      // Les tenues créées avant l'arrivée des mosaïques en reçoivent une ici.
+      try {
+        const deja = new Set(Object.keys(legeres));
+        for (const t of boite.current.tenues) {
+          if (!deja.has(cleCollage(t.id))) await refaireCollage(t);
+        }
+      } catch (e) { /* sans gravité */ }
     })();
   }, []);
+
+  /* Enregistre une photo en grand et sa miniature, et n'affiche que la miniature. */
+  const enregistrerPhoto = async (cle, blob) => {
+    await poser("photos", blob, cle);
+    let mini = blob;
+    try { mini = await miniature(blob); await poser("photos", mini, cleMini(cle)); }
+    catch (e) { /* sans miniature, l'aperçu montre la photo en grand */ }
+    setUrls((u) => {
+      const n = { ...u };
+      if (n[cle]) URL.revokeObjectURL(n[cle]);
+      n[cle] = URL.createObjectURL(mini);
+      return n;
+    });
+  };
+
+  const effacerPhoto = async (cle) => {
+    await oter("photos", cle);
+    await oter("photos", cleMini(cle));
+    setUrls((u) => {
+      const n = { ...u };
+      if (n[cle]) URL.revokeObjectURL(n[cle]);
+      delete n[cle];
+      return n;
+    });
+  };
+
+  /* Fabrique ou refait la mosaïque d'une tenue à partir des photos de ses
+     pièces. Appelée à la création, à la modification, et au chargement pour
+     les tenues qui n'en ont pas encore : aucune migration n'est nécessaire. */
+  const refaireCollage = async (tenue) => {
+    try {
+      const morceaux = [];
+      for (const id of (tenue.itemIds || []).slice(0, 6)) {
+        // La miniature suffit pour une case de 150 px, et pèse dix fois moins.
+        const b = (await lire("photos", cleMini(id))) || (await lire("photos", id));
+        if (b instanceof Blob) morceaux.push(b);
+      }
+      const cle = cleCollage(tenue.id);
+      const image = await collage(morceaux);
+      if (!image) { await oter("photos", cle); return; }
+      await poser("photos", image, cle);
+      setUrls((u) => {
+        const n = { ...u };
+        if (n[cle]) URL.revokeObjectURL(n[cle]);
+        n[cle] = URL.createObjectURL(image);
+        return n;
+      });
+    } catch (e) { /* sans mosaïque, l'affichage retombe sur la première pièce */ }
+  };
 
   const rafraichir = () => {
     setPieces([...boite.current.pieces]);
@@ -73,8 +165,7 @@ export default function App() {
     // La photo n'est enregistrée que si la compression a réellement produit une
     // image. Sans elle, la fiche existe quand même et l'aperçu reste vide.
     if (blob instanceof Blob) {
-      await poser("photos", blob, piece.id);
-      setUrls((u) => ({ ...u, [piece.id]: URL.createObjectURL(blob) }));
+      await enregistrerPhoto(piece.id, blob);
     }
     boite.current.pieces = [piece, ...boite.current.pieces];
     rafraichir();
@@ -92,12 +183,15 @@ export default function App() {
 
   const supprimerPiece = async (id) => {
     await oter("pieces", id);
-    await oter("photos", id);
+    await effacerPhoto(id);
     boite.current.pieces = boite.current.pieces.filter((p) => p.id !== id);
     const touchees = boite.current.tenues.filter((t) => t.itemIds.includes(id));
     boite.current.tenues = boite.current.tenues.map((t) => ({ ...t, itemIds: t.itemIds.filter((x) => x !== id) }));
-    for (const t of touchees) await poser("tenues", { ...t, itemIds: t.itemIds.filter((x) => x !== id) });
-    setUrls((u) => { const n = { ...u }; if (n[id]) URL.revokeObjectURL(n[id]); delete n[id]; return n; });
+    for (const t of touchees) {
+      const maj = { ...t, itemIds: t.itemIds.filter((x) => x !== id) };
+      await poser("tenues", maj);
+      await refaireCollage(maj);
+    }
     rafraichir();
   };
 
@@ -106,11 +200,23 @@ export default function App() {
     await poser("tenues", tenue);
     boite.current.tenues = [tenue, ...boite.current.tenues];
     rafraichir();
+    await refaireCollage(tenue);
+    return tenue;
+  };
+
+  const majTenue = async (tenue) => {
+    await poser("tenues", tenue);
+    boite.current.tenues = boite.current.tenues.map((t) => (t.id === tenue.id ? tenue : t));
+    rafraichir();
+    await refaireCollage(tenue);
     return tenue;
   };
 
   const supprimerTenue = async (id) => {
     await oter("tenues", id);
+    await oter("photos", cleCollage(id));
+    setUrls((u) => { const n = { ...u }; const c2 = cleCollage(id);
+      if (n[c2]) URL.revokeObjectURL(n[c2]); delete n[c2]; return n; });
     boite.current.tenues = boite.current.tenues.filter((t) => t.id !== id);
     // Les créneaux qui pointaient vers cette tenue disparaissent, les autres
     // créneaux de la même journée sont conservés.
@@ -161,26 +267,10 @@ export default function App() {
      tenue planifiée : on peut l'ajouter le jour même ou bien après coup. */
   const ajouterPhotoJour = async (date, fichier) => {
     const b = await compresser(fichier);
-    const cle = clePhotoJour(date);
-    await poser("photos", b, cle);
-    setUrls((u) => {
-      const n = { ...u };
-      if (n[cle]) URL.revokeObjectURL(n[cle]);
-      n[cle] = URL.createObjectURL(b);
-      return n;
-    });
+    await enregistrerPhoto(clePhotoJour(date), b);
   };
 
-  const retirerPhotoJour = async (date) => {
-    const cle = clePhotoJour(date);
-    await oter("photos", cle);
-    setUrls((u) => {
-      const n = { ...u };
-      if (n[cle]) URL.revokeObjectURL(n[cle]);
-      delete n[cle];
-      return n;
-    });
-  };
+  const retirerPhotoJour = (date) => effacerPhoto(clePhotoJour(date));
 
   /* La Cave : les pièces rangées hors saison sortent de la garde-robe courante
      mais restent dans la base. L'historique et les tenues qui les contiennent
@@ -212,8 +302,7 @@ export default function App() {
       delete piece.cadre; // le cadre a servi au découpage, il n'a plus d'usage
       await poser("pieces", piece);
       if (blob instanceof Blob) {
-        await poser("photos", blob, piece.id);
-        setUrls((u) => ({ ...u, [piece.id]: URL.createObjectURL(blob) }));
+        await enregistrerPhoto(piece.id, blob);
       }
       creees.push(piece);
     }
@@ -267,7 +356,7 @@ export default function App() {
     pieces: actives, toutes: pieces, cave: enCave, sacs, marques,
     tenues, journal, urls, stats, setVue, setOuvert, setErreur,
     piece: (id) => pieces.find((p) => p.id === id), // cherche aussi dans la cave
-    ajouterPiece, majPiece, supprimerPiece, ajouterTenue, supprimerTenue,
+    ajouterPiece, majPiece, supprimerPiece, ajouterTenue, majTenue, supprimerTenue,
     ajouterCreneau, majCreneau, retirerCreneau,
     ajouterPhotoJour, retirerPhotoJour, rangerEnCave, sortirDeCave, ajouterPiecesEnCave,
   };
@@ -1026,6 +1115,7 @@ function FichePiece({ id, toutes, urls, stats, majPiece, supprimerPiece, setOuve
   const [edition, setEdition] = useState(false);
   const [confirme, setConfirme] = useState(false);
   const [rangement, setRangement] = useState(false);
+  const grande = usePhotoGrande(id, urls[id]);
   if (!p) return null;
   const u = stats.parPiece[id];
 
@@ -1043,7 +1133,7 @@ function FichePiece({ id, toutes, urls, stats, majPiece, supprimerPiece, setOuve
             annuler={() => setEdition(false)} />
         ) : (
           <>
-            {urls[id] && <img src={urls[id]} alt={p.nom}
+            {grande && <img src={grande} alt={p.nom}
               style={{ width: "100%", maxHeight: "44vh", objectFit: "contain", marginBottom: 18 }} />}
             <div className="fiche">
               <div className="marque">
@@ -1100,6 +1190,7 @@ function FichePiece({ id, toutes, urls, stats, majPiece, supprimerPiece, setOuve
 function VueTenues(c) {
   const { tenues, pieces, ajouterCreneau } = c;
   const [compo, setCompo] = useState(false);
+  const [edition, setEdition] = useState(null);
   const today = iso(new Date());
 
   return (
@@ -1119,6 +1210,7 @@ function VueTenues(c) {
             <div className="entete">mes tenues · {tenues.length}</div>
             {tenues.map((t) => (
               <CarteTenue key={t.id} t={t} {...c}
+                modifier={() => setEdition(t)}
                 action={<button className="bouton discret"
                   onClick={() => ajouterCreneau(today, { tenueId: t.id, libelle: LIBELLE_DEFAUT })}>
                   Portée aujourd'hui
@@ -1133,11 +1225,12 @@ function VueTenues(c) {
         </div>
       )}
       {compo && <Compositeur {...c} fermer={() => setCompo(false)} />}
+      {edition && <Compositeur {...c} depart={edition} fermer={() => setEdition(null)} />}
     </>
   );
 }
 
-function CarteTenue({ t, urls, piece, stats, supprimerTenue, action }) {
+function CarteTenue({ t, urls, piece, stats, supprimerTenue, modifier, action }) {
   const u = stats.parTenue[t.id];
   const [confirme, setConfirme] = useState(false);
   return (
@@ -1147,9 +1240,14 @@ function CarteTenue({ t, urls, piece, stats, supprimerTenue, action }) {
           <div style={{ fontSize: 18, fontWeight: 300 }}>{t.nom}</div>
           {t.note && <p className="note" style={{ margin: "4px 0 0" }}>{t.note}</p>}
         </div>
-        {supprimerTenue && (confirme
-          ? <button style={{ fontSize: 12, color: "var(--alerte)" }} onClick={() => supprimerTenue(t.id)}>confirmer</button>
-          : <button style={{ fontSize: 12, color: "var(--gris)" }} onClick={() => setConfirme(true)}>retirer</button>)}
+        <div style={{ display: "flex", gap: 14, flexShrink: 0 }}>
+          {modifier && (
+            <button style={{ fontSize: 12, color: "var(--doux)" }} onClick={modifier}>modifier</button>
+          )}
+          {supprimerTenue && (confirme
+            ? <button style={{ fontSize: 12, color: "var(--alerte)" }} onClick={() => supprimerTenue(t.id)}>confirmer</button>
+            : <button style={{ fontSize: 12, color: "var(--gris)" }} onClick={() => setConfirme(true)}>retirer</button>)}
+        </div>
       </div>
       <div className="bande">
         {t.itemIds.map((id) => {
@@ -1177,20 +1275,38 @@ function CarteTenue({ t, urls, piece, stats, supprimerTenue, action }) {
 
 /* dateDefaut : jour visé quand la composition part du calendrier, sert au nom
    par défaut. apres : reçoit la tenue créée, pour l'assigner dans la foulée. */
-function Compositeur({ pieces, urls, ajouterTenue, fermer, dateDefaut, apres }) {
-  const [choix, setChoix] = useState([]);
-  const [nom, setNom] = useState("");
-  const groupes = CATS.map((k) => [k, pieces.filter((p) => p.categorie === k)]).filter(([, l]) => l.length);
+function Compositeur({ pieces, urls, ajouterTenue, majTenue, fermer, dateDefaut, apres, depart, toutes }) {
+  const edition = !!depart;
+  const [choix, setChoix] = useState(edition ? [...(depart.itemIds || [])] : []);
+  const [nom, setNom] = useState(edition ? depart.nom || "" : "");
+
+  /* En modification, une pièce déjà rangée à la cave doit rester visible et
+     cochée, sinon elle disparaîtrait de la tenue sans que tu l'aies demandé. */
+  const rangees = edition
+    ? (toutes || []).filter((p) => p.cave && (depart.itemIds || []).includes(p.id))
+    : [];
+  const disponibles = [...pieces, ...rangees];
+  const groupes = CATS.map((k) => [k, disponibles.filter((p) => p.categorie === k)]).filter(([, l]) => l.length);
 
   return (
     <>
       <div className="rideau" onClick={fermer} />
       <div className="panneau">
         <BoutonFermer onClick={fermer} />
-        <h2 style={{ fontWeight: 300, fontSize: 22, margin: "0 0 8px" }}>Composer une tenue</h2>
+        <h2 style={{ fontWeight: 300, fontSize: 22, margin: "0 0 8px" }}>
+          {edition ? "Modifier la tenue" : "Composer une tenue"}
+        </h2>
         <p className="note" style={{ margin: "0 0 16px" }}>
-          {dateDefaut ? `Une pièce suffit. Elle sera assignée au ${joli(dateDefaut)}.` : "Une pièce suffit."}
+          {edition ? "Touche une pièce pour l'ajouter ou la retirer, et renomme si besoin."
+            : dateDefaut ? `Une pièce suffit. Elle sera assignée au ${joli(dateDefaut)}.`
+            : "Une pièce suffit."}
         </p>
+        {rangees.length > 0 && (
+          <p className="note" style={{ margin: "0 0 16px", color: "var(--alerte)" }}>
+            {rangees.length} pièce(s) de cette tenue sont à la cave. Elles restent sélectionnées
+            tant que tu ne les décoches pas.
+          </p>
+        )}
         <div className="champ"><label>Nom</label>
           <input value={nom} onChange={(e) => setNom(e.target.value)} placeholder="Lundi comité de direction" /></div>
         {groupes.map(([cat, liste]) => (
@@ -1200,8 +1316,13 @@ function Compositeur({ pieces, urls, ajouterTenue, fermer, dateDefaut, apres }) 
               {liste.map((p) => (
                 <button className="piece" key={p.id} data-choisie={choix.includes(p.id) ? "1" : "0"}
                   onClick={() => setChoix(choix.includes(p.id) ? choix.filter((x) => x !== p.id) : [...choix, p.id])}>
-                  <div className="photo">{urls[p.id] && <img src={urls[p.id]} alt={p.nom} loading="lazy" />}</div>
-                  <div className="legende"><b>{p.nom}</b>{p.marque || p.sousCategorie}</div>
+                  <div className="photo">
+                    {urls[p.id] && <img src={urls[p.id]} alt={p.nom} loading="lazy"
+                      style={p.cave ? { opacity: 0.45 } : undefined} />}
+                  </div>
+                  <div className="legende">
+                    <b>{p.nom}</b>{p.cave ? `à la cave, ${p.cave.sac}` : (p.marque || p.sousCategorie)}
+                  </div>
                 </button>
               ))}
             </div>
@@ -1211,13 +1332,18 @@ function Compositeur({ pieces, urls, ajouterTenue, fermer, dateDefaut, apres }) 
           <button className="bouton discret" onClick={fermer}>Annuler</button>
           <button className="bouton plein" disabled={!choix.length}
             onClick={async () => {
+              if (edition) {
+                await majTenue({ ...depart, nom: nom.trim() || depart.nom, itemIds: choix });
+                fermer();
+                return;
+              }
               const t = await ajouterTenue({
                 nom: nom.trim() || `Tenue du ${joli(dateDefaut || iso(new Date()))}`,
                 itemIds: choix, note: "",
               });
               if (apres) await apres(t);
               fermer();
-            }}>Enregistrer ({choix.length})</button>
+            }}>{edition ? "Enregistrer" : "Enregistrer"} ({choix.length})</button>
         </div>
       </div>
     </>
@@ -1249,7 +1375,10 @@ function VueCalendrier({ tenues, journal, urls, pieces, ajouterTenue,
 
   const creneauxDu = (date) => journal[date] || [];
 
+  /* Mosaïque de la tenue si elle existe, sinon la première pièce en photo. */
   const imageTenue = (tenueId) => {
+    const mosaique = urls[cleCollage(tenueId)];
+    if (mosaique) return mosaique;
     const t = tenues.find((x) => x.id === tenueId);
     const id = (t?.itemIds || []).find((x) => urls[x]);
     return id ? urls[id] : null;
@@ -1589,7 +1718,7 @@ function FormulaireCreneau({ depart, tenue, valider, annuler, texteValider }) {
 
 /* Photo de ce qui a été porté un jour donné, ajoutée sur le moment ou après coup. */
 function BlocPhotoJour({ jour, urls, champPhoto, enregistrePhoto, retirerPhotoJour }) {
-  const photo = urls[clePhotoJour(jour)];
+  const photo = usePhotoGrande(clePhotoJour(jour), urls[clePhotoJour(jour)]);
   const [confirme, setConfirme] = useState(false);
 
   return (
