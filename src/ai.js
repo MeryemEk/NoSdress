@@ -1,4 +1,4 @@
-const MODELE = "claude-sonnet-5";
+const MODELE = "claude-haiku-4-5-20251001";
 
 export const CATS = ["Haut", "Bas", "Robe", "Veste", "Chaussures", "Sac", "Accessoire", "Bijou"];
 export const SAISONS = ["Printemps", "Été", "Automne", "Hiver"];
