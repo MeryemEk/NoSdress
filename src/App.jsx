@@ -3,6 +3,7 @@ import { tout, lire, poser, oter, inventairePhotos, cleMini, miniature, compress
   exporterDonnees, importerDonnees, resumerSauvegarde, estimerPlace,
   migrerJournal, creneauxAPlat, LIBELLES, LIBELLE_DEFAUT,
   harmoniser, ressemblances } from "./db.js";
+import { noter, MODE_ALLEGE, aEviter, debuter, terminer } from "./diag.js";
 import { identifier, identifierGroupe, lirePage, suggerer, normaliser, codeLocal,
   CATS, SAISONS, FORM, TYPES, MATIERES, COULEURS } from "./ai.js";
 
@@ -33,6 +34,33 @@ function usePhotoGrande(cle, repli) {
   return url || repli;
 }
 
+/* Vignette d'une grille : l'image n'existe que lorsque sa case approche de
+   l'écran, et disparaît quand elle s'en éloigne. La mémoire occupée dépend
+   ainsi de ce qui est visible, pas du nombre de pièces. Un seul observateur
+   pour toutes les cases. */
+const reactions = new WeakMap();
+const guetteur = typeof IntersectionObserver === "undefined" ? null
+  : new IntersectionObserver((entrees) => {
+    entrees.forEach((e) => { const f = reactions.get(e.target); if (f) f(e.isIntersecting); });
+  }, { rootMargin: "900px 0px" });
+
+function Vignette({ src, alt = "", style }) {
+  const cadre = useRef(null);
+  const [proche, setProche] = useState(!guetteur);
+  useEffect(() => {
+    const el = cadre.current;
+    if (!guetteur || !el) return undefined;
+    reactions.set(el, setProche);
+    guetteur.observe(el);
+    return () => { guetteur.unobserve(el); reactions.delete(el); };
+  }, []);
+  return (
+    <div className="photo" ref={cadre}>
+      {proche && src && <img src={src} alt={alt} decoding="async" style={style} />}
+    </div>
+  );
+}
+
 const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const joli = (s) => {
   const [a, m, j] = s.split("-");
@@ -48,58 +76,85 @@ export default function App() {
   const [urls, setUrls] = useState({});
   const [ouvert, setOuvert] = useState(null);
   const [erreur, setErreur] = useState("");
+  const [allege, setAllege] = useState(MODE_ALLEGE);
 
   const boite = useRef({ pieces: [], tenues: [], journal: {} });
 
+  /* Lit les miniatures et les affiche, puis rattrape en arrière-plan celles qui
+     manquent. Séparé du reste du démarrage pour pouvoir s'en passer en mode
+     allégé, et le relancer à la demande. */
+  const chargerPhotos = async () => {
+    const inventaire = await inventairePhotos();
+    const carte = {};
+    // On ignore une éventuelle entrée sans image valide : une seule photo
+    // corrompue ne doit pas empêcher toute la garde-robe de s'ouvrir.
+    Object.entries(inventaire.legeres).forEach(([id, blob]) => {
+      if (blob instanceof Blob) carte[id] = URL.createObjectURL(blob);
+    });
+    setUrls(carte);
+
+    const aMiniaturiser = inventaire.sansMini.filter((cle) => !aEviter(cle));
+    const deja = new Set(Object.keys(inventaire.legeres));
+    const sansCollage = boite.current.tenues.filter((t) => !deja.has(cleCollage(t.id)) && !aEviter(cleCollage(t.id)));
+    noter("photos", `${Object.keys(carte).length} miniatures · ${aMiniaturiser.length} à faire` +
+      ` · ${inventaire.sansMini.length - aMiniaturiser.length} écartées · ${sansCollage.length} mosaïques à faire`);
+    if (!aMiniaturiser.length && !sansCollage.length) return;
+
+    // Le rattrapage attend que l'écran soit affiché, puis avance une photo à la
+    // fois avec une respiration entre chacune : décoder des centaines de photos
+    // d'affilée faisait saccader l'écran et pouvait épuiser la mémoire.
+    const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+    await pause(2500);
+    let faites = 0;
+
+    // Les photos enregistrées avant l'arrivée des miniatures en reçoivent une
+    // ici. Elles apparaissent au fur et à mesure, une seule fois.
+    for (const cle of aMiniaturiser) {
+      debuter(cle);
+      try {
+        const grande = await lire("photos", cle);
+        if (grande instanceof Blob) {
+          const mini = await miniature(grande);
+          await poser("photos", mini, cleMini(cle));
+          setUrls((u) => ({ ...u, [cle]: URL.createObjectURL(mini) }));
+          faites += 1;
+        }
+      } catch (e) { noter("miniature impossible", `${cle} ${e && e.message}`); }
+      terminer();
+      await pause(150);
+    }
+
+    // Les tenues créées avant l'arrivée des mosaïques en reçoivent une ici.
+    for (const t of sansCollage) {
+      debuter(cleCollage(t.id));
+      await refaireCollage(t);
+      terminer();
+      await pause(150);
+    }
+    noter("rattrapage fini", `${faites} miniatures · ${sansCollage.length} mosaïques`);
+  };
+
   useEffect(() => {
     (async () => {
-      let aMiniaturiser = [], legeres = {};
       try {
-        const [p, t, j, inventaire] = await Promise.all([
-          tout("pieces"), tout("tenues"), lire("divers", "journal"), inventairePhotos(),
-        ]);
-        aMiniaturiser = inventaire.sansMini;
-        legeres = inventaire.legeres;
+        const [p, t, j] = await Promise.all([tout("pieces"), tout("tenues"), lire("divers", "journal")]);
         // Le journal peut être à l'ancien format, une seule tenue par date.
         // On le convertit et on ne réécrit la base que si quelque chose a bougé.
         const migre = migrerJournal(j);
         if (migre.change) await poser("divers", migre.journal, "journal");
         boite.current = { pieces: p || [], tenues: t || [], journal: migre.journal };
-        const carte = {};
-        // On ignore une éventuelle entrée sans image valide : une seule photo
-        // corrompue ne doit pas empêcher toute la garde-robe de s'ouvrir.
-        Object.entries(inventaire.legeres).forEach(([id, blob]) => {
-          if (blob instanceof Blob) carte[id] = URL.createObjectURL(blob);
-        });
         setPieces(boite.current.pieces);
         setTenues(boite.current.tenues);
         setJournal(boite.current.journal);
-        setUrls(carte);
+        noter("données", `${boite.current.pieces.length} pièces · ${boite.current.tenues.length} tenues`);
       } catch (e) {
         setErreur("Base locale inaccessible. Vérifie que la navigation privée est désactivée.");
+        setPret(true);
+        return;
       }
       setPret(true);
-
-      // Les photos enregistrées avant l'arrivée des miniatures en reçoivent une
-      // ici, une à la fois pour ne jamais garder plusieurs grandes images en
-      // mémoire. Elles apparaissent au fur et à mesure, une seule fois.
-      for (const cle of aMiniaturiser) {
-        try {
-          const grande = await lire("photos", cle);
-          if (!(grande instanceof Blob)) continue;
-          const mini = await miniature(grande);
-          await poser("photos", mini, cleMini(cle));
-          setUrls((u) => ({ ...u, [cle]: URL.createObjectURL(mini) }));
-        } catch (e) { /* cette photo reste sans aperçu, les autres continuent */ }
-      }
-
-      // Les tenues créées avant l'arrivée des mosaïques en reçoivent une ici.
-      try {
-        const deja = new Set(Object.keys(legeres));
-        for (const t of boite.current.tenues) {
-          if (!deja.has(cleCollage(t.id))) await refaireCollage(t);
-        }
-      } catch (e) { /* sans gravité */ }
+      if (MODE_ALLEGE) return;
+      try { await chargerPhotos(); } catch (e) { noter("photos illisibles", e && e.message); }
     })();
   }, []);
 
@@ -380,6 +435,21 @@ export default function App() {
             <p>{erreur}</p>
             {/Code/i.test(erreur) && <ChampCode onOk={() => setErreur("")} />}
             <button className="bouton discret" style={{ marginTop: 10 }} onClick={() => setErreur("")}>Fermer</button>
+          </div>
+        </div>
+      )}
+
+      {allege && (
+        <div className="corps">
+          <div className="avertissement">
+            <p>L'application a redémarré plusieurs fois de suite. Elle s'est ouverte sans les photos pour rester stable.</p>
+            <div className="duo" style={{ marginTop: 10 }}>
+              <button className="bouton discret" onClick={() => window.__afficherDiag && window.__afficherDiag()}>Voir le journal</button>
+              <button className="bouton discret" onClick={() => {
+                setAllege(false);
+                chargerPhotos().catch((e) => noter("photos illisibles", e && e.message));
+              }}>Afficher les photos</button>
+            </div>
           </div>
         </div>
       )}
@@ -739,9 +809,7 @@ function VueCave(c) {
                   <div className="grille">
                     {dedans.map((p) => (
                       <button className="piece" key={p.id} onClick={() => setOuvert(p.id)}>
-                        <div className="photo">
-                          {urls[p.id] && <img src={urls[p.id]} alt={p.nom} loading="lazy" />}
-                        </div>
+                        <Vignette src={urls[p.id]} alt={p.nom} />
                         <div className="legende"><b>{p.nom}</b>{p.marque || p.sousCategorie}</div>
                       </button>
                     ))}
@@ -812,7 +880,7 @@ function VuePieces(c) {
                     <button className="piece" key={p.id}
                       data-choisie={enMode && selection.includes(p.id) ? "1" : "0"}
                       onClick={() => (enMode ? basculer(p.id) : setOuvert(p.id))}>
-                      <div className="photo">{urls[p.id] && <img src={urls[p.id]} alt={p.nom} loading="lazy" />}</div>
+                      <Vignette src={urls[p.id]} alt={p.nom} />
                       <div className="legende"><b>{p.nom}</b>{p.marque || p.sousCategorie}</div>
                     </button>
                   ))}
@@ -1316,10 +1384,7 @@ function Compositeur({ pieces, urls, ajouterTenue, majTenue, fermer, dateDefaut,
               {liste.map((p) => (
                 <button className="piece" key={p.id} data-choisie={choix.includes(p.id) ? "1" : "0"}
                   onClick={() => setChoix(choix.includes(p.id) ? choix.filter((x) => x !== p.id) : [...choix, p.id])}>
-                  <div className="photo">
-                    {urls[p.id] && <img src={urls[p.id]} alt={p.nom} loading="lazy"
-                      style={p.cave ? { opacity: 0.45 } : undefined} />}
-                  </div>
+                  <Vignette src={urls[p.id]} alt={p.nom} style={p.cave ? { opacity: 0.45 } : undefined} />
                   <div className="legende">
                     <b>{p.nom}</b>{p.cave ? `à la cave, ${p.cave.sac}` : (p.marque || p.sousCategorie)}
                   </div>
@@ -1828,7 +1893,7 @@ function VueIdees(c) {
               <div className="grille">
                 {jamais.slice(0, 8).map((p) => (
                   <button className="piece" key={p.id} onClick={() => setOuvert(p.id)}>
-                    <div className="photo">{urls[p.id] && <img src={urls[p.id]} alt={p.nom} loading="lazy" />}</div>
+                    <Vignette src={urls[p.id]} alt={p.nom} />
                     <div className="legende"><b>{p.nom}</b>{p.marque || p.sousCategorie}</div>
                   </button>
                 ))}

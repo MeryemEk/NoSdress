@@ -1,44 +1,9 @@
+import { noter, afficherDiag } from "./diag.js";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.jsx";
 import "./styles.css";
 
-/* Journal de diagnostic. Note chaque démarrage et chaque erreur dans le
-   stockage local, puis les affiche par-dessus l'application si elle a
-   redémarré plusieurs fois en peu de temps. Indépendant de React, pour rester
-   lisible même si l'interface elle-même plante. */
-const CLE_DIAG = "dressing:diag";
-const journalDiag = () => { try { return JSON.parse(localStorage.getItem(CLE_DIAG) || "[]"); } catch (e) { return []; } };
-const noter = (type, detail = "") => {
-  try {
-    const l = journalDiag();
-    l.push({ t: Date.now(), type, detail: String(detail).slice(0, 400) });
-    localStorage.setItem(CLE_DIAG, JSON.stringify(l.slice(-60)));
-  } catch (e) { /* stockage indisponible */ }
-};
-const nav = (performance.getEntriesByType && performance.getEntriesByType("navigation")[0]) || {};
-noter("démarrage", `${nav.type || "?"} · ${navigator.serviceWorker && navigator.serviceWorker.controller ? "sw" : "sans sw"} · ${innerWidth}×${innerHeight}`);
-addEventListener("error", (e) => noter("erreur", `${e.message} @ ${e.filename}:${e.lineno}`));
-addEventListener("unhandledrejection", (e) => noter("promesse", e.reason && (e.reason.stack || e.reason.message) || e.reason));
-addEventListener("pagehide", () => noter("fermeture"));
-document.addEventListener("visibilitychange", () => noter(document.visibilityState === "hidden" ? "masquée" : "visible"));
-window.__noterDiag = noter;
-
-function afficherDiag(force) {
-  const l = journalDiag();
-  const recents = l.filter((x) => x.type === "démarrage" && Date.now() - x.t < 60000).length;
-  if (!force && recents < 3) return;
-  const boite = document.createElement("div");
-  boite.style.cssText = "position:fixed;left:8px;right:8px;bottom:8px;max-height:60vh;overflow:auto;z-index:99;" +
-    "background:#fff;border:1px solid #A2503C;padding:12px;font:12px/1.4 -apple-system,sans-serif;color:#23231F";
-  const h = (x) => new Date(x.t).toLocaleTimeString("fr-FR") + "  " + x.type + (x.detail ? "  " + x.detail : "");
-  boite.innerHTML = `<b>Diagnostic : ${recents} démarrages dans la dernière minute.</b>
-    <p>Fais une capture d'écran de ce cadre et envoie-la.</p><pre style="white-space:pre-wrap;margin:0"></pre>
-    <button style="margin-top:8px;border:1px solid #ccc;padding:6px 10px">Fermer</button>`;
-  boite.querySelector("pre").textContent = l.slice(-25).reverse().map(h).join("\n");
-  boite.querySelector("button").onclick = () => boite.remove();
-  document.body.appendChild(boite);
-}
 window.__afficherDiag = () => afficherDiag(true);
 setTimeout(() => afficherDiag(false), 1500);
 
@@ -68,12 +33,19 @@ if ("serviceWorker" in navigator) {
   /* Vrai au premier chargement seulement : sert à distinguer une première
      installation, où il ne faut pas recharger, d'une mise à jour, où il faut. */
   const premiereFois = !navigator.serviceWorker.controller;
-  let dejaRecharge = false;
+  /* Un seul rechargement par minute, mémorisé au-delà du rechargement lui-même :
+     sans cela, un service worker qui se réinstallerait à chaque ouverture
+     ferait recharger la page sans fin. */
+  const CLE_RECHARGE = "dressing:recharge";
+  const dejaRecharge = () => {
+    try { return Date.now() - Number(sessionStorage.getItem(CLE_RECHARGE) || 0) < 60000; } catch (e) { return true; }
+  };
 
   navigator.serviceWorker.addEventListener("controllerchange", () => {
-    noter("nouveau service worker", premiereFois ? "première fois" : dejaRecharge ? "déjà rechargé" : "rechargement");
-    if (premiereFois || dejaRecharge) return;
-    dejaRecharge = true;
+    const deja = dejaRecharge();
+    noter("nouveau service worker", premiereFois ? "première fois" : deja ? "déjà rechargé" : "rechargement");
+    if (premiereFois || deja) return;
+    try { sessionStorage.setItem(CLE_RECHARGE, String(Date.now())); } catch (e) { return; }
     location.reload();
   });
 
